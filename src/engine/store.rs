@@ -21,6 +21,17 @@ pub struct TaskRec {
     pub downloaded: u64,
     /// 每段 [已写入位置, 结束位置)
     pub segs: Vec<(u64, u64)>,
+    // v0.2 新增字段：旧数据缺省兼容
+    #[serde(default)]
+    pub auto_dir: bool,
+    #[serde(default)]
+    pub scheduled: bool,
+    #[serde(default)]
+    pub sha256: Option<String>,
+    #[serde(default)]
+    pub hash: Option<String>,
+    #[serde(default)]
+    pub retries: u32,
 }
 
 pub fn data_dir() -> PathBuf {
@@ -33,13 +44,15 @@ fn read<T: for<'a> Deserialize<'a>>(name: &str) -> Option<T> {
     serde_json::from_slice(&s).ok()
 }
 
-fn write<T: Serialize>(name: &str, v: &T) {
+pub fn encode<T: Serialize>(v: &T) -> Vec<u8> {
+    serde_json::to_vec(v).unwrap_or_default()
+}
+
+pub fn write_bytes(name: &str, bytes: &[u8]) {
     let dir = data_dir();
     let _ = std::fs::create_dir_all(&dir);
     let tmp = dir.join(format!("{name}.tmp"));
-    if let Ok(b) = serde_json::to_vec(v)
-        && std::fs::write(&tmp, b).is_ok()
-    {
+    if std::fs::write(&tmp, bytes).is_ok() {
         let _ = std::fs::rename(&tmp, dir.join(name));
     }
 }
@@ -48,11 +61,8 @@ pub fn load_settings() -> Settings {
     read("settings.json").unwrap_or_default()
 }
 pub fn save_settings(s: &Settings) {
-    write("settings.json", s)
+    write_bytes("settings.json", &encode(s))
 }
 pub fn load_tasks() -> Vec<TaskRec> {
     read("tasks.json").unwrap_or_default()
-}
-pub fn save_tasks(t: &[TaskRec]) {
-    write("tasks.json", &t)
 }

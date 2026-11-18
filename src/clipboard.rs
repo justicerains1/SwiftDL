@@ -8,6 +8,7 @@ pub fn spawn(tx: Sender<UiEvent>, m: Arc<Manager>) {
     std::thread::spawn(move || {
         let mut cb: Option<arboard::Clipboard> = None;
         let mut last: Option<String> = None;
+        let mut seq = 0u32;
         loop {
             std::thread::sleep(Duration::from_millis(500));
             let (on, exts) = {
@@ -18,6 +19,12 @@ pub fn spawn(tx: Sender<UiEvent>, m: Arc<Manager>) {
                 last = None;
                 continue;
             }
+            // 序列号未变化说明剪贴板没动过：不打开剪贴板，避免与其他程序争锁
+            let cur = unsafe { windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber() };
+            if cur == seq && last.is_some() {
+                continue;
+            }
+            seq = cur;
             if cb.is_none() {
                 cb = arboard::Clipboard::new().ok();
             }

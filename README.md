@@ -13,6 +13,8 @@
 - **按类型分类保存**：压缩文件、视频、音乐、文档、程序、镜像文件、图片自动存入对应子目录
 - **系统托盘**：关闭窗口后台继续下载，可开机自启动
 - **剪贴板监听**：复制下载链接后自动弹出新建窗口（扩展名可配置）
+- **网页媒体嗅探**：扩展自动发现网页中的视频、音频与 m3u8 流媒体，图标显示数量，弹窗选择清晰度一键下载；网页视频上悬停出现“下载此视频”按钮
+- **HLS（m3u8）下载**：解析主列表与清晰度、分片多线程下载、AES-128 解密、断点续传；fMP4 直接保存为 .mp4，TS 在有 ffmpeg 时无损转为 .mp4（否则保存为 .ts）。不支持 DRM 加密视频与直播流
 - **浏览器接管**：Chrome/Edge 扩展拦截下载，带上 Cookie/Referer；SwiftDL 未运行时交回浏览器下载。首次启动有安装向导：自动打开浏览器扩展页并定位扩展文件夹，装好后自动识别
 - **定期清缓存**：每 30 分钟清理孤立的 `.swdl` 临时文件、过期的已完成记录（默认 30 天）；设置里也可手动立即清理
 - **代理**：留空 = 系统代理，`direct` = 直连，或填写 `http://127.0.0.1:10808` / `socks5://…`
@@ -39,6 +41,7 @@
 . ./env.sh                     # 设置 RUSTUP_HOME / CARGO_HOME / PATH（含 MinGW），路径按本机修改
 cargo build --release          # 产物：target/release/swiftdl.exe
 cargo test --release -- --test-threads=1
+node --test extension/tests       # 扩展嗅探逻辑与后台流程测试
 python -I packaging/package.py # 打包：dist/SwiftDL-v<版本>-windows-x64.zip
 ```
 

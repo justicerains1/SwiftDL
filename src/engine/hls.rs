@@ -189,7 +189,7 @@ pub fn parse(text: &str, base: &str) -> Result<Playlist, String> {
         if vs.is_empty() {
             return Err("主播放列表中没有可用的清晰度".into());
         }
-        vs.sort_by(|a, b| b.bandwidth.cmp(&a.bandwidth));
+        vs.sort_by_key(|v| std::cmp::Reverse(v.bandwidth));
         return Ok(Playlist::Master(vs));
     }
 

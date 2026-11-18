@@ -145,6 +145,8 @@ pub struct AddDialog {
     probed_url: String,
     probe: ProbeSlot,
     info: Option<Result<Info, String>>,
+    /// HLS 主列表中选中的清晰度序号（0 = 最高）
+    variant: usize,
     focus: bool,
 }
 
@@ -164,6 +166,7 @@ impl AddDialog {
             probed_url: String::new(),
             probe: Arc::default(),
             info: None,
+            variant: 0,
             focus: true,
         }
     }
@@ -195,6 +198,7 @@ impl AddDialog {
         if url != self.probed_url {
             self.probed_url = url.clone();
             self.info = None;
+            self.variant = 0;
             if !url.is_empty() {
                 let slot = self.probe.clone();
                 let client = m.client();
@@ -277,6 +281,28 @@ impl AddDialog {
                                         None => {
                                             ui.add(egui::Spinner::new().size(12.0));
                                             ui.label(RichText::new("正在获取文件信息").size(12.5).color(p.weak));
+                                        }
+                                        Some(Ok(i)) if i.hls.is_some() => {
+                                            let h = i.hls.as_ref().unwrap();
+                                            let mins = h.duration as u64 / 60;
+                                            let mut t = format!("HLS 视频流  {} 段  时长 {}:{:02}", h.segments, mins, h.duration as u64 % 60);
+                                            if h.encrypted {
+                                                t.push_str("  已加密");
+                                            }
+                                            ui.label(RichText::new(t).size(12.5).color(p.text));
+                                            if h.variants.len() > 1 {
+                                                let cur = h.variants.get(self.variant).map(|v| v.label()).unwrap_or_default();
+                                                egui::ComboBox::from_id_salt("hls_variant").selected_text(cur).show_ui(ui, |ui| {
+                                                    for (k, v) in h.variants.iter().enumerate() {
+                                                        ui.selectable_value(&mut self.variant, k, v.label());
+                                                    }
+                                                });
+                                            }
+                                            if h.drm {
+                                                ui.label(RichText::new("受 DRM 保护，无法下载").size(12.5).color(p.danger));
+                                            } else if h.live {
+                                                ui.label(RichText::new("直播流暂不支持").size(12.5).color(p.warning));
+                                            }
                                         }
                                         Some(Ok(i)) => {
                                             let sz = i.size.map(fmt_size).unwrap_or_else(|| "大小未知".into());
@@ -370,9 +396,14 @@ impl AddDialog {
                 let auto_dir = dir == default_dir;
                 let single = list.len() == 1;
                 let sha = Some(self.sha256.trim().to_string()).filter(|s| single && !s.is_empty());
+                // HLS：用户选择了非默认清晰度时，直接下载该清晰度的媒体列表
+                let chosen = match &self.info {
+                    Some(Ok(i)) if single && self.variant > 0 => i.hls.as_ref().and_then(|h| h.variants.get(self.variant)).map(|v| v.url.clone()),
+                    _ => None,
+                };
                 for u in list {
                     let mut req = self.extra.clone();
-                    req.url = u;
+                    req.url = chosen.clone().unwrap_or(u);
                     m.add(NewTask {
                         req,
                         name: if single { self.name.clone() } else { String::new() },
@@ -444,6 +475,25 @@ impl SettingsDialog {
                         ui.add(egui::DragValue::new(&mut s.speed_limit_kb).speed(64).range(0..=10_000_000).suffix(" KB/s"));
                         hint(ui, p, "0 表示不限速");
                     });
+                    row(ui, p, "m3u8 转 MP4", |ui| {
+                        ui.checkbox(&mut s.hls_mp4, "流媒体下载完成后用 ffmpeg 无损转为 MP4");
+                    });
+                    row(ui, p, "ffmpeg 路径", |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut s.ffmpeg)
+                                .desired_width(ui.available_width() - 40.0)
+                                .hint_text("留空自动查找"),
+                        );
+                        if icon_button(ui, Icon::Folder, "选择 ffmpeg.exe", true).clicked()
+                            && let Some(f) = rfd::FileDialog::new().add_filter("ffmpeg", &["exe"]).pick_file()
+                        {
+                            s.ffmpeg = f.display().to_string();
+                        }
+                    });
+                    match crate::engine::hls::find_ffmpeg(&s.ffmpeg) {
+                        Some(f) => status_line(ui, Icon::Check, p.success, &format!("已找到 ffmpeg：{}", f.display())),
+                        None => status_line(ui, Icon::Alert, p.weak, "未找到 ffmpeg，m3u8 视频将保存为 .ts（可正常播放）"),
+                    }
                     row(ui, p, "出错自动重试", |ui| {
                         ui.add(egui::DragValue::new(&mut s.auto_retry).range(0..=20).suffix(" 次"));
                         hint(ui, p, "每次间隔 30 秒，0 表示不重试");

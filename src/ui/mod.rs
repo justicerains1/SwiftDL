@@ -139,6 +139,8 @@ struct Row {
     scheduled: bool,
     finished: u64,
     error: Option<String>,
+    /// HLS：(已完成分片, 分片总数)，非 HLS 为 None
+    segs: Option<(u32, u32)>,
 }
 
 pub struct App {
@@ -261,6 +263,7 @@ impl App {
                     scheduled: m.scheduled,
                     finished: m.finished,
                     error: m.error.clone(),
+                    segs: m.hls.is_some().then(|| (t.seg_done.load(Relaxed), t.seg_total.load(Relaxed))).filter(|s| s.1 > 0),
                 }
             })
             .collect()
@@ -674,6 +677,7 @@ impl App {
 
     // ───────────── 详情抽屉 ─────────────
     fn details(&self, ui: &mut Ui, p: &Pal, t: &Arc<Task>) {
+        let hls = t.meta.lock().unwrap().hls.clone();
         let (name, dir, size, err, resumable, probed, created, scheduled, expect, hash, hashing) = {
             let m = t.meta.lock().unwrap();
             (
@@ -750,8 +754,28 @@ impl App {
                 format!("{} / {}", t.active_conns.load(Relaxed), t.conns)
             };
             kv(&mut c[1], "连接数", conns);
-            kv(&mut c[1], "断点续传", if !probed { "未知" } else if resumable { "支持" } else { "不支持" }.into());
+            if let Some(h) = &hls {
+                let mut kind = vec!["HLS 流媒体"];
+                if h.encrypted {
+                    kind.push("AES-128 加密");
+                }
+                if h.fmp4 {
+                    kind.push("fMP4");
+                }
+                let mins = h.duration as u64 / 60;
+                kv(&mut c[0], "类型", format!("{}    时长 {}:{:02}", kind.join("  "), mins, h.duration as u64 % 60));
+                kv(&mut c[1], "分片", format!("{} / {}", t.seg_done.load(Relaxed), h.total));
+            } else {
+                kv(&mut c[1], "断点续传", if !probed { "未知" } else if resumable { "支持" } else { "不支持" }.into());
+            }
         });
+        if let Some(note) = hls.as_ref().and_then(|h| h.note.clone()) {
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+                icons::paint(ui.painter(), r, Icon::Alert, p.warning);
+                ui.label(RichText::new(note).size(12.5).color(p.warning));
+            });
+        }
         if st == Status::Done || expect.is_some() {
             ui.horizontal(|ui| {
                 ui.add_sized([64.0, 22.0], egui::Label::new(RichText::new("SHA-256").size(12.5).color(p.weak)));
@@ -1146,11 +1170,15 @@ fn paint_row(ui: &Ui, p: &Pal, card: Rect, r: &Row, selected: bool, hovered: boo
     painter.with_clip_rect(name_clip).galley(pos2(x0, y1 - gh / 2.0), g, p.text);
 
     // 第二行：进度条 + 百分比 + 大小 + 右侧剩余时间/完成时间/错误
-    let frac = match (st, size) {
-        (Status::Done, _) => 1.0,
-        (_, Some(s)) if s > 0 => done as f32 / s as f32,
+    let hls = r.segs.filter(|_| st != Status::Done);
+    let frac = match (st, size, hls) {
+        (Status::Done, _, _) => 1.0,
+        (_, _, Some((d, n))) => d as f32 / n as f32,
+        (_, Some(s), _) if s > 0 => done as f32 / s as f32,
         _ => 0.0,
     };
+    // HLS 总大小按已完成分片的平均大小估算
+    let est_total = hls.filter(|(d, _)| *d > 0).map(|(d, n)| done / d as u64 * n as u64);
     let bw = ((xr - x0) * 0.42).clamp(80.0, 340.0);
     let bar = Rect::from_min_size(pos2(x0, y2 - 2.5), vec2(bw, 5.0));
     let bar_c = match st {
@@ -1161,6 +1189,11 @@ fn paint_row(ui: &Ui, p: &Pal, card: Rect, r: &Row, selected: bool, hovered: boo
     };
     progress(ui, bar, frac, bar_c);
     let info = match (st, size) {
+        _ if hls.is_some() => {
+            let (d, n) = hls.unwrap_or_default();
+            let est = est_total.map(|e| format!("（约 {}）", fmt_size(e))).unwrap_or_default();
+            format!("第 {d} / {n} 段    {}{est}", fmt_size(done))
+        }
         (Status::Done, Some(s)) => fmt_size(s),
         (_, Some(s)) => format!("{:.1}%    {} / {}", frac * 100.0, fmt_size(done), fmt_size(s)),
         (_, None) if done > 0 => fmt_size(done),
@@ -1169,6 +1202,7 @@ fn paint_row(ui: &Ui, p: &Pal, card: Rect, r: &Row, selected: bool, hovered: boo
     painter.text(pos2(bar.max.x + 12.0, y2), Align2::LEFT_CENTER, info, prop(12.5), p.weak);
     let right2 = match st {
         Status::Running => size
+            .or(est_total)
             .filter(|_| speed > 0)
             .map(|s| format!("剩余 {}", fmt_eta(s.saturating_sub(done) / speed)))
             .unwrap_or_default(),
@@ -1243,6 +1277,7 @@ mod tests {
             "engine/task.rs",
             "engine/probe.rs",
             "engine/kind.rs",
+            "engine/hls.rs",
             "tray.rs",
             "browser.rs",
         ];

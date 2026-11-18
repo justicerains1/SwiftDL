@@ -48,6 +48,14 @@ pub struct AddReq {
     pub user_agent: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThemeMode {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -61,6 +69,7 @@ pub struct Settings {
     pub port: u16,
     /// 已完成记录保留天数，0 = 永久保留
     pub clean_done_days: u32,
+    pub theme: ThemeMode,
 }
 
 impl Default for Settings {
@@ -81,6 +90,7 @@ impl Default for Settings {
                 .into(),
             port: 52080,
             clean_done_days: 30,
+            theme: ThemeMode::System,
         }
     }
 }

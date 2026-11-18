@@ -6,6 +6,7 @@ mod server;
 mod ui;
 
 use engine::{AddReq, Manager, UiEvent};
+use std::sync::Arc;
 use std::time::Duration;
 
 fn main() {
@@ -63,8 +64,9 @@ fn main() {
     let opts = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("SwiftDL")
-            .with_inner_size([960.0, 560.0])
-            .with_min_inner_size([640.0, 360.0]),
+            .with_inner_size([1100.0, 680.0])
+            .with_min_inner_size([760.0, 460.0])
+            .with_icon(Arc::new(ui::app_icon())),
         ..Default::default()
     };
     if let Err(e) = eframe::run_native("SwiftDL", opts, Box::new(move |cc| Ok(Box::new(ui::App::new(cc, app_m, rx))))) {

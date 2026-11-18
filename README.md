@@ -1,0 +1,42 @@
+# SwiftDL
+
+极简、高性能的 Windows 多线程下载器（Rust + egui，单个 exe）。
+
+## 特性
+- **多连接分段下载**：预分配文件，每个连接按偏移直接写入（`seek_write`，无锁），1 MiB 写缓冲
+- **动态分段**：连接空闲时自动把剩余最多的分段对半拆开接手，不会被慢分段拖尾
+- **断点续传**：每秒保存进度；退出或崩溃后重新打开自动续传，并用 ETag/大小校验文件是否变化
+- **队列与限速**：最大同时任务数、全局令牌桶限速
+- **剪贴板监听**：复制下载链接后自动弹出新建窗口（扩展名可配置）
+- **浏览器接管**：Chrome/Edge 扩展拦截下载，带上 Cookie/Referer；SwiftDL 未运行时交回浏览器下载
+- **定期清缓存**：每 30 分钟清理孤立的 `.swdl` 临时文件、过期的已完成记录（默认 30 天）；设置里也可手动立即清理
+- **代理**：留空 = 系统代理，`direct` = 直连，或填写 `http://127.0.0.1:10808` / `socks5://…`
+- **单实例**：`swiftdl.exe <url>` 会把链接交给已在运行的窗口
+
+## 快捷键
+| 按键 | 作用 |
+|---|---|
+| Ctrl+N | 新建下载 |
+| Ctrl+V | 在主界面直接粘贴链接 |
+| Ctrl+Enter / Enter | 在新建窗口中开始下载 |
+| Space | 开始/暂停选中任务 |
+| Delete | 删除选中任务 |
+| Ctrl+A | 全选 |
+| 双击 | 打开已完成文件；未完成则切换开始/暂停 |
+
+## 构建
+需要 Rust（GNU 工具链）和 MinGW-w64：
+
+```sh
+. ./env.sh                     # 设置 RUSTUP_HOME / CARGO_HOME / PATH（含 MinGW），路径按本机修改
+cargo build --release          # 产物：target/release/swiftdl.exe
+cargo test --release -- --test-threads=1
+```
+
+## 安装浏览器扩展
+1. 打开 `edge://extensions` 或 `chrome://extensions`，开启“开发者模式”
+2. 点击“加载已解压的扩展程序”，选择 `extension/` 目录
+3. 扩展图标弹窗中可开关接管、设置最小文件大小和端口（默认 52080）
+
+## 数据位置
+`%APPDATA%\swiftdl\settings.json`、`tasks.json`；下载中的临时文件为 `<文件名>.swdl`，与目标文件放在同一目录。

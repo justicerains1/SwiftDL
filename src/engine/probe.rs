@@ -1,0 +1,108 @@
+//! 资源探测：大小、是否支持分段、文件名、校验标识。
+use super::AddReq;
+use reqwest::header::{self, HeaderMap};
+
+#[derive(Clone, Debug)]
+pub struct Info {
+    pub size: Option<u64>,
+    pub resumable: bool,
+    pub filename: String,
+    pub validator: Option<String>,
+}
+
+pub const DEFAULT_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
+
+pub fn with_headers(mut rb: reqwest::RequestBuilder, req: &AddReq) -> reqwest::RequestBuilder {
+    if let Some(r) = req.referrer.as_deref().filter(|s| !s.is_empty()) {
+        rb = rb.header(header::REFERER, r);
+    }
+    if let Some(c) = req.cookies.as_deref().filter(|s| !s.is_empty()) {
+        rb = rb.header(header::COOKIE, c);
+    }
+    let ua = req.user_agent.as_deref().filter(|s| !s.is_empty()).unwrap_or(DEFAULT_UA);
+    rb.header(header::USER_AGENT, ua)
+}
+
+pub async fn probe(client: &reqwest::Client, req: &AddReq) -> Result<Info, String> {
+    let resp = with_headers(client.get(&req.url), req)
+        .header(header::RANGE, "bytes=0-0")
+        .send()
+        .await
+        .map_err(err_str)?;
+    let status = resp.status().as_u16();
+    let h = resp.headers();
+    let (size, resumable) = match status {
+        206 => {
+            let total = hval(h, header::CONTENT_RANGE)
+                .and_then(|v| v.rsplit('/').next().and_then(|t| t.trim().parse::<u64>().ok()));
+            (total, total.is_some())
+        }
+        200..=299 => (hval(h, header::CONTENT_LENGTH).and_then(|v| v.trim().parse().ok()), false),
+        _ => return Err(format!("HTTP {status}")),
+    };
+    let filename = req
+        .filename
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| hval(h, header::CONTENT_DISPOSITION).and_then(|v| disposition_name(&v)))
+        .or_else(|| url_name(resp.url().as_str()))
+        .or_else(|| url_name(&req.url))
+        .map(|n| sanitize(&n))
+        .unwrap_or_else(|| "download".into());
+    let validator = hval(h, header::ETAG).or_else(|| hval(h, header::LAST_MODIFIED));
+    Ok(Info { size, resumable, filename, validator })
+}
+
+pub fn err_str(e: reqwest::Error) -> String {
+    use std::error::Error;
+    let mut s = e.to_string();
+    let mut src = e.source();
+    while let Some(c) = src {
+        s.push_str(": ");
+        s.push_str(&c.to_string());
+        src = c.source();
+    }
+    s
+}
+
+fn hval(h: &HeaderMap, k: header::HeaderName) -> Option<String> {
+    h.get(k).map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+}
+
+fn decode(s: &str) -> String {
+    percent_encoding::percent_decode_str(s).decode_utf8_lossy().into_owned()
+}
+
+fn disposition_name(v: &str) -> Option<String> {
+    let parts: Vec<&str> = v.split(';').map(str::trim).collect();
+    for p in &parts {
+        if p.len() > 10 && p[..10].eq_ignore_ascii_case("filename*=") {
+            let r = p[10..].trim_matches('"');
+            let enc = r.splitn(3, '\'').nth(2).unwrap_or(r);
+            return Some(decode(enc)).filter(|s| !s.is_empty());
+        }
+    }
+    for p in &parts {
+        if p.len() > 9 && p[..9].eq_ignore_ascii_case("filename=") {
+            return Some(decode(p[9..].trim_matches('"'))).filter(|s| !s.is_empty());
+        }
+    }
+    None
+}
+
+pub fn url_name(u: &str) -> Option<String> {
+    let u = url::Url::parse(u).ok()?;
+    let last = u.path_segments()?.rev().find(|s| !s.is_empty())?;
+    Some(decode(last)).filter(|s| !s.is_empty())
+}
+
+/// 去除 Windows 非法字符
+pub fn sanitize(name: &str) -> String {
+    let s: String = name
+        .chars()
+        .map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { '_' } else { c })
+        .take(200)
+        .collect();
+    let s = s.trim().trim_end_matches(['.', ' ']).to_string();
+    if s.is_empty() { "download".into() } else { s }
+}

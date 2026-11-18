@@ -1,4 +1,5 @@
 //! 下载管理器：任务表、队列调度、限速、持久化、定期清理缓存、计划任务。
+pub mod hls;
 pub mod kind;
 pub mod limiter;
 pub mod probe;
@@ -84,6 +85,10 @@ pub struct Settings {
     pub schedule: sched::Schedule,
     /// 浏览器扩展安装引导已完成或不再提示
     pub ext_guide_done: bool,
+    /// ffmpeg 路径，留空自动查找
+    pub ffmpeg: String,
+    /// HLS（TS）下载完成后用 ffmpeg 转为 MP4
+    pub hls_mp4: bool,
 }
 
 impl Default for Settings {
@@ -112,6 +117,8 @@ impl Default for Settings {
             categorize: true,
             schedule: sched::Schedule::default(),
             ext_guide_done: false,
+            ffmpeg: String::new(),
+            hls_mp4: true,
         }
     }
 }
@@ -164,6 +171,8 @@ pub struct Meta {
     pub error_at: u64,
     /// 更新链接后首次续传：忽略 ETag 差异
     pub relink: bool,
+    /// HLS 流媒体任务的进度
+    pub hls: Option<hls::HlsState>,
 }
 
 pub struct Task {
@@ -181,6 +190,9 @@ pub struct Task {
     pub conn_limit: AtomicU32,
     /// 最近一次被限流的时间（秒）
     pub throttled_at: AtomicU64,
+    /// HLS 分片总数 / 已完成数（界面显示用）
+    pub seg_total: AtomicU32,
+    pub seg_done: AtomicU32,
     pub cancel: Mutex<CancellationToken>,
 }
 
@@ -243,6 +255,7 @@ impl Task {
             sha256: m.sha256.clone(),
             hash: m.hash.clone(),
             retries: m.retries,
+            hls: m.hls.clone(),
         }
     }
 
@@ -250,12 +263,14 @@ impl Task {
         let segs: Vec<Arc<Seg>> = r.segs.iter().map(|&(w, e)| Seg::new(w, e)).collect();
         let downloaded = match (r.status, r.size) {
             (Status::Done, _) => r.size.unwrap_or(r.downloaded),
+            _ if r.hls.is_some() => r.hls.as_ref().map(|h| h.bytes).unwrap_or(0),
             (_, Some(sz)) if r.resumable => {
                 sz - segs.iter().map(|s| s.st.lock().unwrap().end.saturating_sub(s.written.load(Relaxed))).sum::<u64>().min(sz)
             }
             _ => 0,
         };
         let conns = r.conns.clamp(1, 32);
+        let (seg_total, seg_done) = r.hls.as_ref().map(|h| (h.total, h.done)).unwrap_or((0, 0));
         Arc::new(Task {
             id: r.id,
             req: RwLock::new(r.req),
@@ -278,6 +293,7 @@ impl Task {
                 retries: r.retries,
                 error_at: now(),
                 relink: false,
+                hls: r.hls,
             }),
             status: AtomicU8::new(r.status as u8),
             downloaded: AtomicU64::new(downloaded),
@@ -287,6 +303,8 @@ impl Task {
             active_conns: AtomicU32::new(0),
             conn_limit: AtomicU32::new(conns),
             throttled_at: AtomicU64::new(0),
+            seg_total: AtomicU32::new(seg_total),
+            seg_done: AtomicU32::new(seg_done),
             cancel: Mutex::new(CancellationToken::new()),
         })
     }
@@ -463,6 +481,7 @@ impl Manager {
             sha256,
             hash: None,
             retries: 0,
+            hls: None,
         });
         self.tasks.write().unwrap().push(t);
         // 计划任务若正处于时间窗内，立即开始
@@ -513,7 +532,10 @@ impl Manager {
             m.probed = false;
             m.hash = None;
             m.retries = 0;
+            m.hls = None;
         }
+        t.seg_total.store(0, Relaxed);
+        t.seg_done.store(0, Relaxed);
         t.set_status(Status::Queued);
         self.mark_dirty();
         self.schedule();

@@ -32,6 +32,8 @@ pub struct TaskRec {
     pub hash: Option<String>,
     #[serde(default)]
     pub retries: u32,
+    #[serde(default)]
+    pub hls: Option<super::hls::HlsState>,
 }
 
 pub fn data_dir() -> PathBuf {

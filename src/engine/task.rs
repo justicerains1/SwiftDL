@@ -113,19 +113,42 @@ async fn run_inner(m: &Arc<Manager>, t: &Arc<Task>, tok: &CancellationToken) -> 
     };
 
     // 决定是全新下载还是续传
-    let (fresh, resumable, size) = {
-        let mut meta = t.meta.lock().unwrap();
+    // 首次运行：确定文件名与（按类型分类后的）目录
+    {
+        let meta = t.meta.lock().unwrap();
         if meta.name.is_empty() {
+            let mut filename = info.filename.clone();
+            if let Some(h) = &info.hls {
+                // HLS：fMP4 或可用 ffmpeg 转封装时保存为 .mp4，否则为 .ts
+                let s = m.settings.read().unwrap();
+                let mp4 = h.fmp4 || (s.hls_mp4 && super::hls::find_ffmpeg(&s.ffmpeg).is_some());
+                let stem = filename.rsplit_once('.').map(|(a, _)| a.to_string()).unwrap_or(filename.clone());
+                filename = format!("{stem}.{}", if mp4 { "mp4" } else { "ts" });
+            }
             let mut dir = meta.dir.clone();
             if meta.auto_dir && m.settings.read().unwrap().categorize {
-                dir = dir.join(kind::category(&info.filename).folder());
+                dir = dir.join(kind::category(&filename).folder());
             }
             drop(meta);
-            let n = m.reserve_name(t.id, &dir, &info.filename);
-            meta = t.meta.lock().unwrap();
+            let n = m.reserve_name(t.id, &dir, &filename);
+            let mut meta = t.meta.lock().unwrap();
             meta.name = n;
             meta.dir = dir;
         }
+    }
+    if let Some(h) = info.hls {
+        {
+            let mut meta = t.meta.lock().unwrap();
+            meta.probed = true;
+            meta.error = None;
+            meta.relink = false;
+        }
+        m.mark_dirty();
+        m.repaint();
+        return super::hls::run(m, t, tok, client, h).await;
+    }
+    let (fresh, resumable, size) = {
+        let mut meta = t.meta.lock().unwrap();
         let part_exists = meta.dir.join(format!("{}.{}", meta.name, super::PART_EXT)).exists();
         let mut segs = t.segs.lock().unwrap();
         // 更新过链接时只要求大小一致，不比较 ETag（不同镜像的 ETag 不同）

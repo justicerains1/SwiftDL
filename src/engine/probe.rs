@@ -8,6 +8,8 @@ pub struct Info {
     pub resumable: bool,
     pub filename: String,
     pub validator: Option<String>,
+    /// HLS 流媒体（m3u8）的探测结果
+    pub hls: Option<super::hls::HlsInfo>,
 }
 
 pub const DEFAULT_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
@@ -24,6 +26,9 @@ pub fn with_headers(mut rb: reqwest::RequestBuilder, req: &AddReq) -> reqwest::R
 }
 
 pub async fn probe(client: &reqwest::Client, req: &AddReq) -> Result<Info, String> {
+    if super::hls::looks_like_hls(&req.url, "") {
+        return probe_hls(client, req).await;
+    }
     let resp = with_headers(client.get(&req.url), req)
         .header(header::RANGE, "bytes=0-0")
         .send()
@@ -31,6 +36,11 @@ pub async fn probe(client: &reqwest::Client, req: &AddReq) -> Result<Info, Strin
         .map_err(err_str)?;
     let status = resp.status().as_u16();
     let h = resp.headers();
+    // 扩展名不是 m3u8 但 Content-Type 表明是播放列表
+    if (200..300).contains(&status) && super::hls::looks_like_hls("", &hval(h, header::CONTENT_TYPE).unwrap_or_default()) {
+        drop(resp);
+        return probe_hls(client, req).await;
+    }
     let (size, resumable) = match status {
         206 => {
             let total = hval(h, header::CONTENT_RANGE)
@@ -50,7 +60,14 @@ pub async fn probe(client: &reqwest::Client, req: &AddReq) -> Result<Info, Strin
         .map(|n| sanitize(&n))
         .unwrap_or_else(|| "download".into());
     let validator = hval(h, header::ETAG).or_else(|| hval(h, header::LAST_MODIFIED));
-    Ok(Info { size, resumable, filename, validator })
+    Ok(Info { size, resumable, filename, validator, hls: None })
+}
+
+/// HLS：解析播放列表（主列表时取最高码率的媒体列表），文件名先按 .mp4 预设，任务开始时再定扩展名
+async fn probe_hls(client: &reqwest::Client, req: &AddReq) -> Result<Info, String> {
+    let (info, _) = super::hls::load(client, req, &req.url).await?;
+    let stem = super::hls::stem_for(&req.url, req.filename.as_deref());
+    Ok(Info { size: None, resumable: false, filename: sanitize(&format!("{stem}.mp4")), validator: None, hls: Some(info) })
 }
 
 pub fn err_str(e: reqwest::Error) -> String {

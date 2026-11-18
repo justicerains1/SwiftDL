@@ -138,6 +138,85 @@ async fn chunked() -> Response<Body> {
     Response::builder().body(slow_body(0, SIZE / 4, BASE)).unwrap()
 }
 
+// ───────────── HLS 测试服务器 ─────────────
+const SEGS: usize = 40;
+const HLS_KEY: [u8; 16] = [0x11; 16];
+
+/// 第 i 个分片的明文（不同清晰度内容不同，便于验证选择了哪个）
+fn seg_plain(v: &str, i: usize) -> Vec<u8> {
+    let off = if v == "low" { 7 } else { 0 };
+    let len = 50_000 + i * 37;
+    DATA[i * 60_000 + off..i * 60_000 + off + len].to_vec()
+}
+
+fn hls_expected(v: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    if v == "fmp4" {
+        out.extend_from_slice(b"INIT-SEGMENT-ftyp-moov");
+    }
+    (0..SEGS).for_each(|i| out.extend(seg_plain(v, i)));
+    out
+}
+
+async fn hls_master() -> String {
+    "#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360
+low/index.m3u8
+     #EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720
+high/index.m3u8
+"
+        .into()
+}
+
+async fn hls_file(AxPath((v, file)): AxPath<(String, String)>) -> Response<Body> {
+    if file == "index.m3u8" {
+        let mut t = String::from("#EXTM3U
+#EXT-X-TARGETDURATION:4
+");
+        let ext = if v == "fmp4" { "m4s" } else { "ts" };
+        match v.as_str() {
+            "enc" | "keybad" => t.push_str("#EXT-X-MEDIA-SEQUENCE:5
+#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"
+"),
+            "fmp4" => t.push_str("#EXT-X-MAP:URI=\"init.mp4\"
+"),
+            "drm" => t.push_str("#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"skd://k\",KEYFORMAT=\"com.apple.streamingkeydelivery\"
+"),
+            _ => {}
+        }
+        for i in 0..SEGS {
+            t.push_str(&format!("#EXTINF:4.0,
+seg{i}.{ext}
+"));
+        }
+        if v != "live" {
+            t.push_str("#EXT-X-ENDLIST
+");
+        }
+        return Response::builder().header("content-type", "application/vnd.apple.mpegurl").body(Body::from(t)).unwrap();
+    }
+    if file == "key.bin" {
+        return if v == "keybad" { status(404) } else { Response::new(Body::from(HLS_KEY.to_vec())) };
+    }
+    if file == "init.mp4" {
+        return Response::new(Body::from(&b"INIT-SEGMENT-ftyp-moov"[..]));
+    }
+    let Some(i) = file.strip_prefix("seg").and_then(|f| f.split('.').next()).and_then(|n| n.parse::<usize>().ok()) else {
+        return status(404);
+    };
+    if v == "bad" && i == 7 {
+        return status(404);
+    }
+    tokio::time::sleep(Duration::from_millis(if v == "slow" { 90 } else { 15 })).await;
+    let mut data = seg_plain(&v, i);
+    if v == "enc" {
+        use aes::cipher::{BlockModeEncrypt, KeyIvInit, block_padding::Pkcs7};
+        let iv = ((5 + i) as u128).to_be_bytes();
+        data = cbc::Encryptor::<aes::Aes128>::new(&HLS_KEY.into(), &iv.into()).encrypt_padded_vec::<Pkcs7>(&data);
+    }
+    Response::new(Body::from(data))
+}
+
 struct Env {
     rt: tokio::runtime::Runtime,
     base: String,
@@ -162,7 +241,9 @@ fn env(name: &str) -> Env {
         .route("/stall", get(stall))
         .route("/gone", get(gone))
         .route("/norange", get(norange))
-        .route("/chunked", get(chunked));
+        .route("/chunked", get(chunked))
+        .route("/hls/master.m3u8", get(hls_master))
+        .route("/hls/{v}/{file}", get(hls_file));
     rt.spawn(async move { axum::serve(listener, app).await.unwrap() });
     Env { rt, base, dir: root.join("dl") }
 }
@@ -492,4 +573,89 @@ fn real_download() {
         size as f64 / el / 1048576.0,
         t.meta.lock().unwrap().resumable
     );
+}
+
+#[test]
+fn hls_e2e() {
+    let e = env("hls");
+    let m = Manager::new(e.rt.handle().clone(), settings(&e));
+    let run = |path: &str, name: &str| {
+        let t = add(&m, &e, path, name, 4);
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while !matches!(t.status(), Status::Done | Status::Error) {
+            assert!(std::time::Instant::now() < deadline, "HLS 任务超时");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        t
+    };
+    let read = |t: &Task| std::fs::read(t.final_path()).unwrap();
+
+    // 1. 主列表：默认选择最高码率；无 ffmpeg 时保存为 .ts 并说明原因
+    let t = run("/hls/master.m3u8", "");
+    assert_eq!(t.status(), Status::Done, "{:?}", t.meta.lock().unwrap().error);
+    assert!(t.final_path().extension().is_some_and(|x| x == "ts"), "{:?}", t.final_path());
+    assert!(read(&t) == hls_expected("high"), "主列表应下载最高清晰度");
+    assert!(t.meta.lock().unwrap().hls.as_ref().unwrap().note.as_deref().unwrap_or("").contains("ffmpeg"));
+    assert_eq!(t.seg_done.load(Relaxed), SEGS as u32);
+    assert!(!t.part_path().exists());
+
+    // 2. 直接给低清晰度媒体列表
+    let t = run("/hls/low/index.m3u8", "low.ts");
+    assert!(read(&t) == hls_expected("low"));
+
+    // 3. AES-128 加密（IV 由媒体序号推导）
+    let t = run("/hls/enc/index.m3u8", "enc.ts");
+    assert_eq!(t.status(), Status::Done, "{:?}", t.meta.lock().unwrap().error);
+    assert!(read(&t) == hls_expected("enc"), "解密结果应与明文一致");
+    assert!(t.meta.lock().unwrap().hls.as_ref().unwrap().encrypted);
+
+    // 4. fMP4：初始化段 + 分片，直接保存为 .mp4
+    let t = run("/hls/fmp4/index.m3u8", "clip.mp4");
+    assert!(t.final_path().extension().is_some_and(|x| x == "mp4"));
+    assert!(read(&t) == hls_expected("fmp4"));
+
+    // 5. 暂停 → 持久化 → 续传，结果一致
+    let t = add(&m, &e, "/hls/slow/index.m3u8", "slow.ts", 4);
+    std::thread::sleep(Duration::from_millis(500));
+    m.pause(t.id);
+    wait(&t, Status::Paused, 10);
+    let done = t.seg_done.load(Relaxed);
+    assert!(done > 0 && (done as usize) < SEGS, "暂停时已完成 {done} 段");
+    m.save();
+    let rec = store::load_tasks().into_iter().find(|r| r.id == t.id).unwrap();
+    assert_eq!(rec.hls.as_ref().unwrap().done, done);
+    m.start(t.id);
+    wait(&t, Status::Done, 60);
+    assert!(read(&t) == hls_expected("slow"), "续传后内容应一致");
+
+    // 6. ffmpeg 合并（用脚本替身）：成功则得到 .mp4，失败则保留 .ts
+    let ok_ff = e.dir.parent().unwrap().join("fake_ffmpeg.cmd");
+    std::fs::write(&ok_ff, "@echo off\r\nset in=%7\r\nshift & shift & shift & shift & shift & shift & shift & shift & shift\r\ncopy /y /b %in% %3 >nul\r\n").unwrap();
+    let bad_ff = e.dir.parent().unwrap().join("bad_ffmpeg.cmd");
+    std::fs::write(&bad_ff, "@echo off\r\nexit /b 1\r\n").unwrap();
+    let cur = m.settings.read().unwrap().clone();
+    m.apply_settings(Settings { ffmpeg: ok_ff.display().to_string(), ..cur.clone() });
+    let t = run("/hls/high/index.m3u8", "ff.ts");
+    assert_eq!(t.status(), Status::Done, "{:?}", t.meta.lock().unwrap().error);
+    assert!(t.final_path().extension().is_some_and(|x| x == "mp4"), "{:?}", t.final_path());
+    assert!(read(&t) == hls_expected("high"));
+    assert!(t.meta.lock().unwrap().hls.as_ref().unwrap().note.is_none());
+    m.apply_settings(Settings { ffmpeg: bad_ff.display().to_string(), ..cur.clone() });
+    let t = run("/hls/high/index.m3u8", "ffbad");
+    assert!(t.final_path().extension().is_some_and(|x| x == "ts"), "{:?}", t.final_path());
+    assert!(t.meta.lock().unwrap().hls.as_ref().unwrap().note.as_deref().unwrap().contains("转换 MP4 失败"));
+    m.apply_settings(cur);
+
+    // 7. 失败场景都要给出明确原因
+    for (path, want) in [
+        ("/hls/drm/index.m3u8", "DRM"),
+        ("/hls/live/index.m3u8", "直播"),
+        ("/hls/bad/index.m3u8", "404"),
+        ("/hls/keybad/index.m3u8", "密钥"),
+    ] {
+        let t = run(path, "");
+        assert_eq!(t.status(), Status::Error, "{path}");
+        let err = t.meta.lock().unwrap().error.clone().unwrap();
+        assert!(err.contains(want), "{path}: {err}");
+    }
 }

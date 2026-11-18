@@ -165,6 +165,11 @@ pub struct App {
     toasts: Vec<Toast>,
     theme: Option<ThemeMode>,
     tray: Option<Tray>,
+    notifier: crate::winsys::Notifier,
+    taskbar: Option<crate::winsys::Taskbar>,
+    drop_over: Option<Arc<std::sync::atomic::AtomicBool>>,
+    hidden: bool,
+    tray_tip: (String, Instant),
     quitting: bool,
     start_hidden: bool,
     first_frame: bool,
@@ -175,10 +180,13 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext, m: Arc<Manager>, rx: Receiver<UiEvent>, minimized: bool) -> Self {
+    pub fn new(cc: &eframe::CreationContext, m: Arc<Manager>, rx: Receiver<UiEvent>, tx: std::sync::mpsc::Sender<UiEvent>, minimized: bool) -> Self {
         theme::install(&cc.egui_ctx);
         let _ = m.ui_ctx.set(cc.egui_ctx.clone());
         let tray = crate::tray::create(&cc.egui_ctx);
+        let hwnd = crate::winsys::hwnd_of(cc);
+        let taskbar = hwnd.and_then(crate::winsys::Taskbar::new);
+        let drop_over = hwnd.and_then(|h| crate::winsys::register_drop(h, tx, cc.egui_ctx.clone()));
         Self {
             m,
             rx,
@@ -208,6 +216,11 @@ impl App {
             was_busy: false,
             countdown_at: None,
             ext_was_connected: false,
+            notifier: crate::winsys::Notifier::new(),
+            taskbar,
+            drop_over,
+            hidden: false,
+            tray_tip: (String::new(), Instant::now()),
         }
     }
 
@@ -216,7 +229,7 @@ impl App {
             Some(d) => d.append(reqs),
             None => self.add = Some(AddDialog::new(&self.m, reqs)),
         }
-        show_window(ctx);
+        self.show(ctx);
     }
 
     fn toast(&mut self, task: Option<u64>, kind: ToastKind, title: &'static str, text: String) {
@@ -306,19 +319,34 @@ impl App {
         }
     }
 
-    /// 任务状态变化时弹出提示
-    fn detect_changes(&mut self, rows: &[Row]) {
+    fn show(&mut self, ctx: &egui::Context) {
+        self.hidden = false;
+        show_window(ctx);
+    }
+
+    fn hide(&mut self, ctx: &egui::Context) {
+        self.hidden = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+    }
+
+    /// 任务状态变化时提示：窗口在前台用应用内提示，隐藏/不在前台时用系统通知
+    fn detect_changes(&mut self, ctx: &egui::Context, rows: &[Row]) {
+        let foreground = !self.hidden && ctx.input(|i| i.viewport().focused.unwrap_or(true));
         for r in rows {
             if let Some(prev) = self.prev.insert(r.t.id, r.status)
                 && prev != r.status
             {
-                match r.status {
-                    Status::Done => self.toast(Some(r.t.id), ToastKind::Ok, "下载完成", r.name.clone()),
+                let (kind, title, text) = match r.status {
+                    Status::Done => (ToastKind::Ok, "下载完成", r.name.clone()),
                     Status::Error if prev == Status::Running => {
-                        let text = r.error.clone().unwrap_or_else(|| r.name.clone());
-                        self.toast(Some(r.t.id), ToastKind::Err, "下载失败", text)
+                        (ToastKind::Err, "下载失败", format!("{}：{}", r.name, r.error.clone().unwrap_or_default()))
                     }
-                    _ => {}
+                    _ => continue,
+                };
+                if foreground {
+                    self.toast(Some(r.t.id), kind, title, text);
+                } else {
+                    self.notifier.send(title, &text);
                 }
             }
         }
@@ -871,6 +899,64 @@ impl App {
         ctx.request_repaint_after(Duration::from_millis(33));
     }
 
+    /// 任务栏进度条与托盘提示
+    fn update_system(&mut self, rows: &[Row]) {
+        let running: Vec<&Row> = rows.iter().filter(|r| r.status == Status::Running).collect();
+        let (done, total) = running.iter().fold((0f64, 0f64), |(d, t), r| match (r.segs, r.size) {
+            (Some((sd, sn)), _) => (d + sd as f64 / sn.max(1) as f64, t + 1.0),
+            (_, Some(s)) if s > 0 => (d + r.done as f64 / s as f64, t + 1.0),
+            _ => (d, t),
+        });
+        let frac = if total > 0.0 { (done / total) as f32 } else { 0.0 };
+        let queued = rows.iter().any(|r| r.status == Status::Queued);
+        let failed = rows.iter().any(|r| r.status == Status::Error);
+        let p = if !running.is_empty() && failed {
+            // 仍在下载但有任务失败：红色提醒
+            crate::winsys::Progress::Error(frac)
+        } else if !running.is_empty() {
+            crate::winsys::Progress::Normal(frac)
+        } else if queued {
+            crate::winsys::Progress::Paused(0.0)
+        } else {
+            crate::winsys::Progress::None
+        };
+        if let Some(tb) = &mut self.taskbar {
+            tb.set(p);
+        }
+        if self.tray_tip.1.elapsed() >= Duration::from_secs(1)
+            && let Some(tray) = &self.tray
+        {
+            self.tray_tip.1 = Instant::now();
+            let speed: u64 = running.iter().map(|r| r.speed).sum();
+            let tip = if running.is_empty() {
+                "SwiftDL 下载器  空闲".to_string()
+            } else {
+                format!("SwiftDL 下载器\n下载中 {} 个  {}", running.len(), fmt_speed(speed))
+            };
+            if tip != self.tray_tip.0 {
+                let _ = tray.icon.set_tooltip(Some(&tip));
+                self.tray_tip.0 = tip;
+            }
+        }
+    }
+
+    /// 拖放悬停时的提示层
+    fn drop_overlay(&self, ctx: &egui::Context) {
+        if !self.drop_over.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) {
+            return;
+        }
+        let p = theme::pal_ctx(ctx);
+        let rect = ctx.content_rect();
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::unique("drop_overlay")));
+        painter.rect_filled(rect, 0, p.bg.gamma_multiply(0.85));
+        let card = Rect::from_center_size(rect.center(), vec2(380.0, 180.0));
+        painter.rect(card, 16, p.panel, Stroke::new(2.0, p.accent), StrokeKind::Inside);
+        icons::paint(&painter, Rect::from_center_size(card.center() - vec2(0.0, 28.0), vec2(40.0, 40.0)), Icon::Download, p.accent);
+        painter.text(card.center() + vec2(0.0, 24.0), Align2::CENTER_CENTER, "松开鼠标添加下载", bold(17.0), p.text);
+        painter.text(card.center() + vec2(0.0, 52.0), Align2::CENTER_CENTER, "支持链接、文本、.txt 链接列表、.url 快捷方式", prop(12.5), p.weak);
+        ctx.request_repaint_after(Duration::from_millis(100));
+    }
+
     fn shortcuts(&mut self, ctx: &egui::Context, rows: &[Row]) {
         if self.add.is_some() || self.settings.is_some() || self.delete.is_some() || self.relink.is_some() || self.ext_guide.is_some() {
             return;
@@ -950,10 +1036,14 @@ impl App {
 impl eframe::App for App {
     /// 每帧（包括窗口隐藏在托盘时）都会调用：处理托盘、关闭、完成动作
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 状态变化、任务栏进度、托盘提示：窗口隐藏在托盘时也要更新
+        let rows = self.snapshot();
+        self.detect_changes(ctx, &rows);
+        self.update_system(&rows);
         if self.first_frame {
             self.first_frame = false;
             if self.start_hidden {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.hide(ctx);
             } else if !self.m.settings.read().unwrap().ext_guide_done && !crate::browser::connected() {
                 self.ext_guide = Some(ExtGuide::new());
             }
@@ -971,7 +1061,7 @@ impl eframe::App for App {
         let cmds: Vec<TrayCmd> = self.tray.as_ref().map(|t| t.rx.try_iter().collect()).unwrap_or_default();
         for c in cmds {
             match c {
-                TrayCmd::Show => show_window(ctx),
+                TrayCmd::Show => self.show(ctx),
                 TrayCmd::StartAll => self.all_ids().into_iter().for_each(|id| self.m.start(id)),
                 TrayCmd::PauseAll => self.all_ids().into_iter().for_each(|id| self.m.pause(id)),
                 TrayCmd::Quit => self.quit(ctx),
@@ -985,14 +1075,14 @@ impl eframe::App for App {
                 self.close_ask = Some(CloseAsk::new());
             } else if s.close_to_tray {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.hide(ctx);
             }
         }
         // 全部完成后的动作：从“有任务在跑”变为“全部空闲”时开始倒计时
         let busy = self.m.tasks.read().unwrap().iter().any(|t| matches!(t.status(), Status::Running | Status::Queued));
         if self.after_all != AfterAll::Nothing && self.was_busy && !busy && self.countdown_at.is_none() {
             self.countdown_at = Some(Instant::now());
-            show_window(ctx);
+            self.show(ctx);
         }
         if busy {
             self.countdown_at = None;
@@ -1017,13 +1107,12 @@ impl eframe::App for App {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
                 UiEvent::Add(r) => self.open_add(&ctx, r),
-                UiEvent::Show => show_window(&ctx),
+                UiEvent::Show => self.show(&ctx),
             }
         }
         let rows = self.snapshot();
         self.shortcuts(&ctx, &rows);
         self.sample_speed(&rows);
-        self.detect_changes(&rows);
         let p = theme::pal(ui);
 
         egui::Panel::left("sidebar")
@@ -1094,7 +1183,7 @@ impl eframe::App for App {
                         remember_as(true);
                     }
                     self.close_ask = None;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                    self.hide(&ctx);
                 }
                 CloseChoice::Quit { remember } => {
                     if remember {
@@ -1117,6 +1206,7 @@ impl eframe::App for App {
             }
         }
         self.toasts(&ctx);
+        self.drop_overlay(&ctx);
 
         // 仅在有任务活动时定时刷新，空闲时零 CPU
         if rows.iter().any(|r| r.status == Status::Running) {

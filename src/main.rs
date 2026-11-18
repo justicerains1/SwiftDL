@@ -6,6 +6,7 @@ mod engine;
 mod server;
 mod tray;
 mod ui;
+mod winsys;
 
 use engine::{AddReq, Manager, UiEvent};
 use std::sync::Arc;
@@ -83,15 +84,18 @@ fn main() {
     engine::sys::watch_network();
 
     let app_m = m.clone();
+    let ui_tx = tx.clone();
     let opts = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("SwiftDL")
             .with_inner_size([1100.0, 680.0])
             .with_min_inner_size([760.0, 460.0])
-            .with_icon(Arc::new(ui::app_icon())),
+            .with_icon(Arc::new(ui::app_icon()))
+            // 使用自定义拖放目标（支持链接与文本），关闭 winit 自带的仅文件拖放
+            .with_drag_and_drop(false),
         ..Default::default()
     };
-    if let Err(e) = eframe::run_native("SwiftDL", opts, Box::new(move |cc| Ok(Box::new(ui::App::new(cc, app_m, rx, minimized))))) {
+    if let Err(e) = eframe::run_native("SwiftDL", opts, Box::new(move |cc| Ok(Box::new(ui::App::new(cc, app_m, rx, ui_tx, minimized))))) {
         eprintln!("界面启动失败: {e}");
         rfd::MessageDialog::new()
             .set_level(rfd::MessageLevel::Error)

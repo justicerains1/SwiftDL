@@ -3206,6 +3206,7 @@ dependencies = [
  "eframe",
  "futures-util",
  "percent-encoding",
+ "raw-window-handle",
  "reqwest",
  "rfd",
  "serde",
@@ -3216,6 +3217,8 @@ dependencies = [
  "tray-icon",
  "url",
  "wgpu",
+ "windows",
+ "windows-core",
  "windows-sys 0.61.2",
 ]
 

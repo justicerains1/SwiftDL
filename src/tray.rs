@@ -13,7 +13,7 @@ pub enum TrayCmd {
 }
 
 pub struct Tray {
-    _icon: TrayIcon,
+    pub icon: TrayIcon,
     pub rx: Receiver<TrayCmd>,
 }
 
@@ -64,7 +64,7 @@ pub fn create(ctx: &egui::Context) -> Option<Tray> {
             c2.request_repaint();
         }
     }));
-    Some(Tray { _icon: tray, rx })
+    Some(Tray { icon: tray, rx })
 }
 
 /// 开机自启动（当前用户）：写入/删除 HKCU Run 键

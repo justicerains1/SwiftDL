@@ -27,10 +27,10 @@ pub fn fmt_speed(b: u64) -> String {
 pub fn fmt_eta(secs: u64) -> String {
     match secs {
         0 => String::new(),
-        s if s < 60 => format!("{s} 秒"),
-        s if s < 3600 => format!("{} 分 {} 秒", s / 60, s % 60),
-        s if s < 86400 * 3 => format!("{} 小时 {} 分", s / 3600, s % 3600 / 60),
-        _ => "超过 3 天".into(),
+        s if s < 60 => trf!("{} 秒", s),
+        s if s < 3600 => trf!("{} 分 {} 秒", s / 60, s % 60),
+        s if s < 86400 * 3 => trf!("{} 小时 {} 分", s / 3600, s % 3600 / 60),
+        _ => tr!("超过 3 天").into(),
     }
 }
 
@@ -40,10 +40,10 @@ pub fn fmt_ago(ts: u64) -> String {
     }
     let d = crate::engine::now().saturating_sub(ts);
     match d {
-        d if d < 60 => "刚刚".into(),
-        d if d < 3600 => format!("{} 分钟前", d / 60),
-        d if d < 86400 => format!("{} 小时前", d / 3600),
-        d => format!("{} 天前", d / 86400),
+        d if d < 60 => tr!("刚刚").into(),
+        d if d < 3600 => trf!("{} 分钟前", d / 60),
+        d if d < 86400 => trf!("{} 小时前", d / 3600),
+        d => trf!("{} 天前", d / 86400),
     }
 }
 

@@ -32,7 +32,7 @@ impl Variant {
             .resolution
             .as_deref()
             .and_then(|r| r.split_once('x').map(|(_, h)| format!("{h}p")))
-            .unwrap_or_else(|| "未知清晰度".into());
+            .unwrap_or_else(|| tr!("未知清晰度").into());
         if self.bandwidth > 0 { format!("{q}  {:.1} Mbps", self.bandwidth as f64 / 1e6) } else { q }
     }
 }
@@ -142,7 +142,7 @@ fn join(base: &str, uri: &str) -> Result<String, String> {
     url::Url::parse(base)
         .and_then(|b| b.join(uri.trim()))
         .map(|u| u.to_string())
-        .map_err(|e| format!("无效的分片地址 {uri}: {e}"))
+        .map_err(|e| trf!("无效的分片地址 {}: {}", uri, e))
 }
 
 /// "len@offset" 或 "len"（偏移接续上一段）
@@ -165,7 +165,7 @@ pub fn parse(text: &str, base: &str) -> Result<Playlist, String> {
     let text = text.trim_start_matches('\u{feff}');
     let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
     if lines.next() != Some("#EXTM3U") {
-        return Err("不是有效的 m3u8 播放列表".into());
+        return Err(tr!("不是有效的 m3u8 播放列表").into());
     }
     let all: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
 
@@ -187,7 +187,7 @@ pub fn parse(text: &str, base: &str) -> Result<Playlist, String> {
             }
         }
         if vs.is_empty() {
-            return Err("主播放列表中没有可用的清晰度".into());
+            return Err(tr!("主播放列表中没有可用的清晰度").into());
         }
         vs.sort_by_key(|v| std::cmp::Reverse(v.bandwidth));
         return Ok(Playlist::Master(vs));
@@ -215,14 +215,14 @@ pub fn parse(text: &str, base: &str) -> Result<Playlist, String> {
             match method.as_str() {
                 "NONE" => key = None,
                 "AES-128" if format_ok => {
-                    let uri = a.get("URI").ok_or("加密密钥缺少 URI")?;
+                    let uri = a.get("URI").ok_or(tr!("加密密钥缺少 URI"))?;
                     key = Some(Key { uri: join(base, uri)?, iv: a.get("IV").and_then(|s| parse_iv(s)) });
                 }
                 _ => m.drm = true,
             }
         } else if let Some(v) = l.strip_prefix("#EXT-X-MAP:") {
             let a = attrs(v);
-            let uri = a.get("URI").ok_or("初始化段缺少 URI")?;
+            let uri = a.get("URI").ok_or(tr!("初始化段缺少 URI"))?;
             m.map = Some((join(base, uri)?, a.get("BYTERANGE").and_then(|r| byterange(r, 0))));
         } else if *l == "#EXT-X-ENDLIST" {
             m.endlist = true;
@@ -249,7 +249,7 @@ pub fn decrypt(key: &[u8; 16], iv: &[u8; 16], data: &mut Vec<u8>) -> Result<(), 
     use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::Pkcs7};
     let n = cbc::Decryptor::<aes::Aes128>::new(key.into(), iv.into())
         .decrypt_padded::<Pkcs7>(data)
-        .map_err(|_| "分片解密失败（密钥错误或数据损坏）".to_string())?
+        .map_err(|_| tr!("分片解密失败（密钥错误或数据损坏）").to_string())?
         .len();
     data.truncate(n);
     Ok(())
@@ -273,11 +273,11 @@ async fn get_text(client: &reqwest::Client, req: &AddReq, url: &str) -> Result<S
     let resp = with_headers(client.get(url), req).send().await.map_err(err_str)?;
     let st = resp.status().as_u16();
     if !(200..300).contains(&st) {
-        return Err(format!("获取播放列表失败 (HTTP {st})"));
+        return Err(trf!("获取播放列表失败 (HTTP {})", st));
     }
     let b = resp.bytes().await.map_err(err_str)?;
     if b.len() > MAX_PLAYLIST {
-        return Err("播放列表过大".into());
+        return Err(tr!("播放列表过大").into());
     }
     Ok(String::from_utf8_lossy(&b).into_owned())
 }
@@ -292,7 +292,7 @@ pub async fn load(client: &reqwest::Client, req: &AddReq, url: &str) -> Result<(
             let t = get_text(client, req, &best).await?;
             match parse(&t, &best)? {
                 Playlist::Media(m) => (vs, best, m),
-                Playlist::Master(_) => return Err("不支持嵌套的主播放列表".into()),
+                Playlist::Master(_) => return Err(tr!("不支持嵌套的主播放列表").into()),
             }
         }
     };
@@ -358,7 +358,7 @@ fn remux(ffmpeg: &Path, input: &Path, output: &Path) -> Result<(), String> {
         .creation_flags(0x0800_0000)
         .status()
         .map_err(|e| e.to_string())?;
-    if st.success() && output.is_file() { Ok(()) } else { Err(format!("ffmpeg 退出码 {:?}", st.code())) }
+    if st.success() && output.is_file() { Ok(()) } else { Err(trf!("ffmpeg 退出码 {}", format!("{:?}", st.code()))) }
 }
 
 struct Ctx {
@@ -378,10 +378,10 @@ async fn fetch_key(c: &Ctx, uri: &str) -> Result<[u8; 16], String> {
     let resp = with_headers(c.client.get(uri), &c.req).send().await.map_err(err_str)?;
     let st = resp.status().as_u16();
     if !(200..300).contains(&st) {
-        return Err(format!("获取解密密钥失败 (HTTP {st})"));
+        return Err(trf!("获取解密密钥失败 (HTTP {})", st));
     }
     let b = resp.bytes().await.map_err(err_str)?;
-    let k: [u8; 16] = b.as_ref().try_into().map_err(|_| format!("解密密钥长度应为 16 字节，实际 {}", b.len()))?;
+    let k: [u8; 16] = b.as_ref().try_into().map_err(|_| trf!("解密密钥长度应为 16 字节，实际 {}", b.len()))?;
     keys.insert(uri.to_string(), k);
     Ok(k)
 }
@@ -407,7 +407,7 @@ async fn fetch_seg(c: &Ctx, url: &str, range: Option<(u64, u64)>, key: Option<([
             let st = resp.status().as_u16();
             if !(200..300).contains(&st) {
                 let fatal = matches!(st, 401 | 403 | 404 | 410);
-                return Err((format!("分片下载失败 (HTTP {st})"), fatal));
+                return Err((trf!("分片下载失败 (HTTP {})", st), fatal));
             }
             let mut buf = Vec::with_capacity(resp.content_length().unwrap_or(0).min(64 << 20) as usize);
             loop {
@@ -416,7 +416,7 @@ async fn fetch_seg(c: &Ctx, url: &str, range: Option<(u64, u64)>, key: Option<([
                     _ = c.tok.cancelled() => return Err((CANCELLED.into(), true)),
                     r = tokio::time::timeout(stall, resp.chunk()) => match r {
                         Ok(r) => r.map_err(|e| (err_str(e), false))?,
-                        Err(_) => return Err(("连接停滞".into(), false)),
+                        Err(_) => return Err((tr!("连接停滞").into(), false)),
                     },
                 };
                 let Some(b) = chunk else { break };
@@ -460,10 +460,10 @@ fn write_at(file: &File, data: &[u8], off: u64) -> Result<(), String> {
     let mut done = 0;
     while done < data.len() {
         match file.seek_write(&data[done..], off + done as u64) {
-            Ok(0) => return Err("写入 0 字节".into()),
+            Ok(0) => return Err(tr!("写入 0 字节").into()),
             Ok(n) => done += n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(format!("写入失败: {e}")),
+            Err(e) => return Err(trf!("写入失败: {}", e)),
         }
     }
     Ok(())
@@ -472,7 +472,7 @@ fn write_at(file: &File, data: &[u8], off: u64) -> Result<(), String> {
 /// 执行 HLS 任务。调用前任务名称与目录已确定。
 pub async fn run(m: &Arc<Manager>, t: &Arc<Task>, tok: &CancellationToken, client: reqwest::Client, info: HlsInfo) -> Result<(), String> {
     if info.drm {
-        return Err("该视频受 DRM 保护，无法下载".into());
+        return Err(tr!("该视频受 DRM 保护，无法下载").into());
     }
     let req = t.req();
     // 续传时沿用当初选定的清晰度；新任务用探测结果（默认最高码率）
@@ -484,23 +484,23 @@ pub async fn run(m: &Arc<Manager>, t: &Arc<Task>, tok: &CancellationToken, clien
     };
     let media = match parse(&text, &media_url)? {
         Playlist::Media(md) => md,
-        Playlist::Master(_) => return Err("不支持嵌套的主播放列表".into()),
+        Playlist::Master(_) => return Err(tr!("不支持嵌套的主播放列表").into()),
     };
     if media.drm {
-        return Err("该视频受 DRM 保护，无法下载".into());
+        return Err(tr!("该视频受 DRM 保护，无法下载").into());
     }
     if !media.endlist {
-        return Err("这是直播流，暂不支持下载".into());
+        return Err(tr!("这是直播流，暂不支持下载").into());
     }
     if media.segments.is_empty() {
-        return Err("播放列表中没有分片".into());
+        return Err(tr!("播放列表中没有分片").into());
     }
     let total = media.segments.len() as u32;
 
     // 续传判断：分片数一致且临时文件存在
     let part = t.part_path();
     let dir = t.meta.lock().unwrap().dir.clone();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建目录: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| trf!("无法创建目录: {}", e))?;
     let resume = prev.as_ref().filter(|s| s.total == total && s.media_url == media_url && part.exists() && s.done < total).cloned();
     let mut st = resume.unwrap_or(HlsState {
         media_url: media_url.clone(),
@@ -510,7 +510,7 @@ pub async fn run(m: &Arc<Manager>, t: &Arc<Task>, tok: &CancellationToken, clien
         duration: media.duration(),
         ..Default::default()
     });
-    let f = OpenOptions::new().read(true).write(true).create(true).truncate(st.done == 0 && !st.map_done).open(&part).map_err(|e| format!("无法打开文件: {e}"))?;
+    let f = OpenOptions::new().read(true).write(true).create(true).truncate(st.done == 0 && !st.map_done).open(&part).map_err(|e| trf!("无法打开文件: {}", e))?;
     f.set_len(st.bytes).map_err(|e| e.to_string())?;
     let file = Arc::new(f);
     t.downloaded.store(st.bytes, Relaxed);
@@ -584,7 +584,7 @@ pub async fn run(m: &Arc<Manager>, t: &Arc<Task>, tok: &CancellationToken, clien
     let mut note = None;
     let final_name = if st.fmp4 {
         let n = super::unique_name(&format!("{stem}.mp4"), |n| dir.join(n).exists());
-        std::fs::rename(&part, dir.join(&n)).map_err(|e| format!("重命名失败: {e}"))?;
+        std::fs::rename(&part, dir.join(&n)).map_err(|e| trf!("重命名失败: {}", e))?;
         n
     } else {
         let mp4 = super::unique_name(&format!("{stem}.mp4"), |n| dir.join(n).exists());
@@ -596,13 +596,13 @@ pub async fn run(m: &Arc<Manager>, t: &Arc<Task>, tok: &CancellationToken, clien
                     Ok(()) => true,
                     Err(e) => {
                         let _ = std::fs::remove_file(dir.join(&mp4));
-                        note = Some(format!("转换 MP4 失败（{e}），已保存为 .ts"));
+                        note = Some(trf!("转换 MP4 失败（{}），已保存为 .ts", e));
                         false
                     }
                 }
             }
             (true, None) => {
-                note = Some("未找到 ffmpeg，已保存为 .ts".into());
+                note = Some(tr!("未找到 ffmpeg，已保存为 .ts").into());
                 false
             }
             (false, _) => false,
@@ -612,7 +612,7 @@ pub async fn run(m: &Arc<Manager>, t: &Arc<Task>, tok: &CancellationToken, clien
             mp4
         } else {
             let ts = super::unique_name(&format!("{stem}.ts"), |n| dir.join(n).exists());
-            std::fs::rename(&part, dir.join(&ts)).map_err(|e| format!("重命名失败: {e}"))?;
+            std::fs::rename(&part, dir.join(&ts)).map_err(|e| trf!("重命名失败: {}", e))?;
             ts
         }
     };

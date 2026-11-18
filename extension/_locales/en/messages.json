@@ -1,0 +1,104 @@
+{
+  "extName": {
+    "message": "SwiftDL Download Helper"
+  },
+  "extDesc": {
+    "message": "Hands browser downloads and web videos/audio (including m3u8) to SwiftDL for multi-connection speed"
+  },
+  "menuDownload": {
+    "message": "Download with SwiftDL"
+  },
+  "statusConnected": {
+    "message": "Connected"
+  },
+  "statusUnpaired": {
+    "message": "Not paired"
+  },
+  "statusNotRunning": {
+    "message": "Not running"
+  },
+  "statusAppNotRunning": {
+    "message": "SwiftDL is not running"
+  },
+  "pairHint": {
+    "message": "Pairing needed: copy the pairing token from SwiftDL Settings > Security & privacy and paste it here"
+  },
+  "pairPlaceholder": {
+    "message": "Pairing token"
+  },
+  "pairButton": {
+    "message": "Pair"
+  },
+  "pageMedia": {
+    "message": "Media on this page"
+  },
+  "settings": {
+    "message": "Settings"
+  },
+  "optEnabled": {
+    "message": "Take over browser downloads"
+  },
+  "optFloat": {
+    "message": "Show a download button on web videos"
+  },
+  "optMin": {
+    "message": "Minimum file size to take over (KB)"
+  },
+  "optPort": {
+    "message": "Port"
+  },
+  "empty": {
+    "message": "Play a video or audio on the page and downloadable media will show up here"
+  },
+  "tagVideo": {
+    "message": "Video"
+  },
+  "tagAudio": {
+    "message": "Audio"
+  },
+  "stream": {
+    "message": "Stream"
+  },
+  "dashUnsupported": {
+    "message": "DASH not supported yet"
+  },
+  "btnDownload": {
+    "message": "Download"
+  },
+  "btnSending": {
+    "message": "Sending"
+  },
+  "btnSent": {
+    "message": "Sent"
+  },
+  "btnFailed": {
+    "message": "Failed"
+  },
+  "floatButton": {
+    "message": "Download video"
+  },
+  "floatTitle": {
+    "message": "Download with SwiftDL"
+  },
+  "floatClose": {
+    "message": "Hide on this page"
+  },
+  "finding": {
+    "message": "Looking for downloadable videos"
+  },
+  "noneFound": {
+    "message": "No downloadable video found. Play the video first.<br>DRM-protected videos cannot be downloaded."
+  },
+  "nowPlaying": {
+    "message": "Now playing"
+  },
+  "sentOk": {
+    "message": "Sent to SwiftDL"
+  },
+  "sentFail": {
+    "message": "Failed to send: make sure SwiftDL is running"
+  },
+  "unpairedError": {
+    "message": "Not paired: enter the pairing token from SwiftDL settings in the extension popup"
+  }
+}

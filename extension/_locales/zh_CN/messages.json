@@ -1,0 +1,104 @@
+{
+  "extName": {
+    "message": "SwiftDL 下载接管"
+  },
+  "extDesc": {
+    "message": "接管浏览器下载、嗅探网页视频音频（含 m3u8），交给 SwiftDL 多线程加速"
+  },
+  "menuDownload": {
+    "message": "使用 SwiftDL 下载"
+  },
+  "statusConnected": {
+    "message": "已连接"
+  },
+  "statusUnpaired": {
+    "message": "未配对"
+  },
+  "statusNotRunning": {
+    "message": "未运行"
+  },
+  "statusAppNotRunning": {
+    "message": "SwiftDL 未运行"
+  },
+  "pairHint": {
+    "message": "需要配对：在 SwiftDL 设置 → 安全与隐私 中复制配对令牌，粘贴到这里"
+  },
+  "pairPlaceholder": {
+    "message": "配对令牌"
+  },
+  "pairButton": {
+    "message": "配对"
+  },
+  "pageMedia": {
+    "message": "本页媒体"
+  },
+  "settings": {
+    "message": "设置"
+  },
+  "optEnabled": {
+    "message": "接管浏览器下载"
+  },
+  "optFloat": {
+    "message": "在网页视频上显示下载按钮"
+  },
+  "optMin": {
+    "message": "接管的最小文件大小 (KB)"
+  },
+  "optPort": {
+    "message": "端口"
+  },
+  "empty": {
+    "message": "播放网页中的视频或音频后，可下载的资源会出现在这里"
+  },
+  "tagVideo": {
+    "message": "视频"
+  },
+  "tagAudio": {
+    "message": "音频"
+  },
+  "stream": {
+    "message": "流媒体"
+  },
+  "dashUnsupported": {
+    "message": "DASH 暂不支持"
+  },
+  "btnDownload": {
+    "message": "下载"
+  },
+  "btnSending": {
+    "message": "发送中"
+  },
+  "btnSent": {
+    "message": "已发送"
+  },
+  "btnFailed": {
+    "message": "失败"
+  },
+  "floatButton": {
+    "message": "下载此视频"
+  },
+  "floatTitle": {
+    "message": "使用 SwiftDL 下载"
+  },
+  "floatClose": {
+    "message": "本页不再显示"
+  },
+  "finding": {
+    "message": "正在查找可下载的视频"
+  },
+  "noneFound": {
+    "message": "未检测到可下载的视频，请先播放视频。<br>受 DRM 保护的视频无法下载。"
+  },
+  "nowPlaying": {
+    "message": "当前播放"
+  },
+  "sentOk": {
+    "message": "已发送到 SwiftDL"
+  },
+  "sentFail": {
+    "message": "发送失败：请确认 SwiftDL 正在运行"
+  },
+  "unpairedError": {
+    "message": "未配对：请在扩展弹窗中填写 SwiftDL 设置里的配对令牌"
+  }
+}

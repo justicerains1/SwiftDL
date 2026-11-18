@@ -38,11 +38,11 @@ impl Filter {
     const ALL: [Filter; 5] = [Self::All, Self::Running, Self::Queued, Self::Unfinished, Self::Done];
     fn label(self) -> &'static str {
         match self {
-            Self::All => "全部任务",
-            Self::Running => "下载中",
-            Self::Queued => "排队中",
-            Self::Unfinished => "未完成",
-            Self::Done => "已完成",
+            Self::All => tr!("全部任务"),
+            Self::Running => tr!("下载中"),
+            Self::Queued => tr!("排队中"),
+            Self::Unfinished => tr!("未完成"),
+            Self::Done => tr!("已完成"),
         }
     }
     fn icon(self) -> Icon {
@@ -77,10 +77,10 @@ impl Sort {
     const ALL: [Sort; 4] = [Self::Added, Self::Name, Self::Size, Self::Status];
     fn label(self) -> &'static str {
         match self {
-            Self::Added => "队列顺序",
-            Self::Name => "名称",
-            Self::Size => "大小",
-            Self::Status => "状态",
+            Self::Added => tr!("队列顺序"),
+            Self::Name => tr!("名称"),
+            Self::Size => tr!("大小"),
+            Self::Status => tr!("状态"),
         }
     }
 }
@@ -98,18 +98,18 @@ impl AfterAll {
     const ALL: [AfterAll; 4] = [Self::Nothing, Self::Exit, Self::Sleep, Self::Shutdown];
     fn label(self) -> &'static str {
         match self {
-            Self::Nothing => "不执行操作",
-            Self::Exit => "退出程序",
-            Self::Sleep => "睡眠",
-            Self::Shutdown => "关机",
+            Self::Nothing => tr!("不执行操作"),
+            Self::Exit => tr!("退出程序"),
+            Self::Sleep => tr!("睡眠"),
+            Self::Shutdown => tr!("关机"),
         }
     }
     fn verb(self) -> &'static str {
         match self {
             Self::Nothing => "",
-            Self::Exit => "退出 SwiftDL",
-            Self::Sleep => "进入睡眠",
-            Self::Shutdown => "关闭计算机",
+            Self::Exit => tr!("退出 SwiftDL"),
+            Self::Sleep => tr!("进入睡眠"),
+            Self::Shutdown => tr!("关闭计算机"),
         }
     }
 }
@@ -119,6 +119,8 @@ enum ToastKind {
     Ok,
     Err,
 }
+
+type UpdateSlot = Arc<std::sync::Mutex<Option<Result<Option<crate::update::Release>, String>>>>;
 
 /// 更新下载状态
 #[derive(Clone, Default)]
@@ -182,7 +184,7 @@ pub struct App {
     tray_tip: (String, Instant),
     /// 自动更新：检查结果、下载状态
     update: Option<crate::update::Release>,
-    update_slot: Arc<std::sync::Mutex<Option<Result<Option<crate::update::Release>, String>>>>,
+    update_slot: UpdateSlot,
     update_job: Arc<std::sync::Mutex<UpdateJob>>,
     update_checked_at: Instant,
     quitting: bool,
@@ -356,9 +358,9 @@ impl App {
                 && prev != r.status
             {
                 let (kind, title, text) = match r.status {
-                    Status::Done => (ToastKind::Ok, "下载完成", r.name.clone()),
+                    Status::Done => (ToastKind::Ok, tr!("下载完成"), r.name.clone()),
                     Status::Error if prev == Status::Running => {
-                        (ToastKind::Err, "下载失败", format!("{}：{}", r.name, r.error.clone().unwrap_or_default()))
+                        (ToastKind::Err, tr!("下载失败"), trf!("{}：{}", r.name, r.error.clone().unwrap_or_default()))
                     }
                     _ => continue,
                 };
@@ -385,7 +387,7 @@ impl App {
             ui.label(RichText::new("SwiftDL").font(bold(18.0)).color(p.text));
         });
         ui.add_space(22.0);
-        ui.label(RichText::new("分类").size(12.0).color(p.weak));
+        ui.label(RichText::new(tr!("分类")).size(12.0).color(p.weak));
         ui.add_space(2.0);
         ui.spacing_mut().item_spacing.y = 2.0;
         for f in Filter::ALL {
@@ -404,7 +406,7 @@ impl App {
             ui.add_space(gap);
         }
         ui.spacing_mut().item_spacing.y = 4.0;
-        ui.label(RichText::new("全部完成后").size(12.0).color(p.weak));
+        ui.label(RichText::new(tr!("全部完成后")).size(12.0).color(p.weak));
         egui::ComboBox::from_id_salt("after_all")
             .width(ui.available_width())
             .selected_text(self.after_all.label())
@@ -419,7 +421,7 @@ impl App {
         painter.rect(rect, 10, p.panel, Stroke::new(1.0, p.stroke), StrokeKind::Inside);
         let inner = rect.shrink(12.0);
         icons::paint(painter, Rect::from_min_size(inner.min, vec2(14.0, 14.0)), Icon::ArrowDown, p.accent);
-        painter.text(pos2(inner.min.x + 20.0, inner.min.y + 7.0), Align2::LEFT_CENTER, "总速度", prop(12.0), p.weak);
+        painter.text(pos2(inner.min.x + 20.0, inner.min.y + 7.0), Align2::LEFT_CENTER, tr!("总速度"), prop(12.0), p.weak);
         let total = self.history.back().copied().unwrap_or(0);
         painter.text(pos2(inner.min.x, inner.min.y + 32.0), Align2::LEFT_CENTER, fmt_speed(total), bold(19.0), p.text);
         let spark = Rect::from_min_size(pos2(inner.min.x, inner.min.y + 48.0), vec2(inner.width(), 40.0));
@@ -428,7 +430,7 @@ impl App {
             ui.painter().text(
                 pos2(inner.min.x, inner.max.y - 6.0),
                 Align2::LEFT_CENTER,
-                format!("已限速 {}", fmt_speed(limit * 1024)),
+                trf!("已限速 {}", fmt_speed(limit * 1024)),
                 prop(12.0),
                 p.warning,
             );
@@ -440,32 +442,32 @@ impl App {
         let p = theme::pal(ui);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            if button(ui, Btn::Primary, Some(Icon::Plus), "新建下载").on_hover_text("Ctrl+N").clicked() {
+            if button(ui, Btn::Primary, Some(Icon::Plus), tr!("新建下载")).on_hover_text("Ctrl+N").clicked() {
                 self.open_add(ui.ctx(), vec![]);
             }
             ui.add_space(10.0);
             let has = !self.sel.is_empty();
-            if icon_button(ui, Icon::Play, "开始（Space）", has).clicked() {
+            if icon_button(ui, Icon::Play, tr!("开始（Space）"), has).clicked() {
                 self.selected().into_iter().for_each(|id| self.m.start(id));
             }
-            if icon_button(ui, Icon::Pause, "暂停（Space）", has).clicked() {
+            if icon_button(ui, Icon::Pause, tr!("暂停（Space）"), has).clicked() {
                 self.selected().into_iter().for_each(|id| self.m.pause(id));
             }
-            if icon_button(ui, Icon::Trash, "删除（Delete）", has).clicked() {
+            if icon_button(ui, Icon::Trash, tr!("删除（Delete）"), has).clicked() {
                 self.delete = Some(DeleteDialog::new(self.selected()));
             }
             ui.add_space(6.0);
             separator_v(ui, &p);
             ui.add_space(6.0);
-            if button(ui, Btn::Secondary, Some(Icon::Play), "全部开始").clicked() {
+            if button(ui, Btn::Secondary, Some(Icon::Play), tr!("全部开始")).clicked() {
                 self.all_ids().into_iter().for_each(|id| self.m.start(id));
             }
             ui.add_space(4.0);
-            if button(ui, Btn::Secondary, Some(Icon::Pause), "全部暂停").clicked() {
+            if button(ui, Btn::Secondary, Some(Icon::Pause), tr!("全部暂停")).clicked() {
                 self.all_ids().into_iter().for_each(|id| self.m.pause(id));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if icon_button(ui, Icon::Settings, "设置", true).clicked() {
+                if icon_button(ui, Icon::Settings, tr!("设置"), true).clicked() {
                     self.settings = Some(SettingsDialog::new(&self.m));
                 }
                 ui.add_space(6.0);
@@ -487,7 +489,7 @@ impl App {
         let te_rect = Rect::from_min_max(pos2(rect.min.x + 32.0, rect.center().y - 11.0), pos2(rect.max.x - clear_w, rect.center().y + 11.0));
         let te = ui.put(
             te_rect,
-            egui::TextEdit::singleline(&mut self.search).id(id).frame(Frame::NONE).hint_text("搜索文件名或链接"),
+            egui::TextEdit::singleline(&mut self.search).id(id).frame(Frame::NONE).hint_text(tr!("搜索文件名或链接")),
         );
         if self.focus_search {
             te.request_focus();
@@ -516,9 +518,9 @@ impl App {
         self.update_banner(ui, &p);
         ui.horizontal(|ui| {
             ui.label(RichText::new(self.filter.label()).font(bold(17.0)).color(p.text));
-            ui.label(RichText::new(format!("{} 项", vis.len())).size(13.0).color(p.weak));
+            ui.label(RichText::new(trf!("{} 项", vis.len())).size(13.0).color(p.weak));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let (icon, tip) = if self.sort_desc { (Icon::ArrowDown, "降序") } else { (Icon::ArrowUp, "升序") };
+                let (icon, tip) = if self.sort_desc { (Icon::ArrowDown, tr!("降序")) } else { (Icon::ArrowUp, tr!("升序")) };
                 if icon_button(ui, icon, tip, true).clicked() {
                     self.sort_desc = !self.sort_desc;
                 }
@@ -527,10 +529,10 @@ impl App {
                         ui.selectable_value(&mut self.sort, s, s.label());
                     }
                 });
-                ui.label(RichText::new("排序").size(13.0).color(p.weak));
+                ui.label(RichText::new(tr!("排序")).size(13.0).color(p.weak));
                 if self.filter == Filter::Done && !vis.is_empty() {
                     ui.add_space(8.0);
-                    if button(ui, Btn::Secondary, Some(Icon::Trash), "清除记录").on_hover_text("仅移除列表记录，不删除文件").clicked() {
+                    if button(ui, Btn::Secondary, Some(Icon::Trash), tr!("清除记录")).on_hover_text(tr!("仅移除列表记录，不删除文件")).clicked() {
                         let ids: Vec<u64> = vis.iter().map(|r| r.t.id).collect();
                         self.m.remove(&ids, false);
                     }
@@ -601,11 +603,11 @@ impl App {
         let st = r.status;
         let t = &r.t;
         let (main_icon, main_tip) = match st {
-            Status::Running | Status::Queued => (Icon::Pause, "暂停"),
-            Status::Done => (Icon::External, "打开文件"),
-            _ => (Icon::Play, "开始"),
+            Status::Running | Status::Queued => (Icon::Pause, tr!("暂停")),
+            Status::Done => (Icon::External, tr!("打开文件")),
+            _ => (Icon::Play, tr!("开始")),
         };
-        let actions = [(main_icon, main_tip), (Icon::Folder, "打开所在文件夹"), (Icon::Trash, "删除")];
+        let actions = [(main_icon, main_tip), (Icon::Folder, tr!("打开所在文件夹")), (Icon::Trash, tr!("删除"))];
         let bw = 30.0;
         let total = bw * actions.len() as f32 + 4.0 * (actions.len() - 1) as f32;
         let area = Rect::from_min_max(pos2(card.max.x - total - 24.0, card.min.y + 1.0), pos2(card.max.x - 1.0, card.max.y - 1.0));
@@ -640,60 +642,60 @@ impl App {
     fn row_menu(&mut self, ui: &mut Ui, r: &Row) {
         let st = r.status;
         let t = &r.t;
-        if st == Status::Done && menu_item(ui, Icon::External, "打开文件", false).clicked() {
+        if st == Status::Done && menu_item(ui, Icon::External, tr!("打开文件"), false).clicked() {
             open_path(&t.final_path(), false);
             ui.close();
         }
-        if menu_item(ui, Icon::Folder, "打开所在文件夹", false).clicked() {
+        if menu_item(ui, Icon::Folder, tr!("打开所在文件夹"), false).clicked() {
             open_path(&if st == Status::Done { t.final_path() } else { t.part_path() }, true);
             ui.close();
         }
         ui.separator();
-        if matches!(st, Status::Paused | Status::Error) && menu_item(ui, Icon::Play, "开始", false).clicked() {
+        if matches!(st, Status::Paused | Status::Error) && menu_item(ui, Icon::Play, tr!("开始"), false).clicked() {
             self.selected().into_iter().for_each(|id| self.m.start(id));
             ui.close();
         }
-        if matches!(st, Status::Running | Status::Queued) && menu_item(ui, Icon::Pause, "暂停", false).clicked() {
+        if matches!(st, Status::Running | Status::Queued) && menu_item(ui, Icon::Pause, tr!("暂停"), false).clicked() {
             self.selected().into_iter().for_each(|id| self.m.pause(id));
             ui.close();
         }
         if matches!(st, Status::Queued | Status::Paused) {
-            if menu_item(ui, Icon::ArrowUp, "移到队首", false).clicked() {
+            if menu_item(ui, Icon::ArrowUp, tr!("移到队首"), false).clicked() {
                 self.m.move_task(t.id, Move::Top);
                 ui.close();
             }
-            if menu_item(ui, Icon::ArrowUp, "上移", false).clicked() {
+            if menu_item(ui, Icon::ArrowUp, tr!("上移"), false).clicked() {
                 self.m.move_task(t.id, Move::Up);
                 ui.close();
             }
-            if menu_item(ui, Icon::ArrowDown, "下移", false).clicked() {
+            if menu_item(ui, Icon::ArrowDown, tr!("下移"), false).clicked() {
                 self.m.move_task(t.id, Move::Down);
                 ui.close();
             }
         }
         ui.separator();
-        if st != Status::Done && menu_item(ui, Icon::Refresh, "更新下载链接", false).clicked() {
+        if st != Status::Done && menu_item(ui, Icon::Refresh, tr!("更新下载链接"), false).clicked() {
             self.relink = RelinkDialog::new(&self.m, t.id);
             ui.close();
         }
-        if st != Status::Running && menu_item(ui, Icon::Refresh, "重新下载", false).clicked() {
+        if st != Status::Running && menu_item(ui, Icon::Refresh, tr!("重新下载"), false).clicked() {
             self.m.restart(t.id);
             ui.close();
         }
-        if st == Status::Done && menu_item(ui, Icon::Check, "计算 SHA-256", false).clicked() {
+        if st == Status::Done && menu_item(ui, Icon::Check, tr!("计算 SHA-256"), false).clicked() {
             self.m.hash_task(t.id);
             self.sel.clear();
             self.sel.insert(t.id);
             ui.close();
         }
-        if menu_item(ui, Icon::Copy, "复制链接", false).clicked() {
+        if menu_item(ui, Icon::Copy, tr!("复制链接"), false).clicked() {
             let url = t.url();
             *self.m.clip_ignore.lock().unwrap() = url.clone();
             ui.ctx().copy_text(url);
             ui.close();
         }
         ui.separator();
-        if menu_item(ui, Icon::Trash, "删除", true).clicked() {
+        if menu_item(ui, Icon::Trash, tr!("删除"), true).clicked() {
             self.delete = Some(DeleteDialog::new(self.selected()));
             ui.close();
         }
@@ -708,15 +710,15 @@ impl App {
             icons::paint(ui.painter(), r.shrink(12.0), if filtered { Icon::Search } else { Icon::Inbox }, p.weak);
             ui.add_space(18.0);
             let (title, sub) = if filtered {
-                ("没有符合条件的任务", "试试其他分类或搜索词")
+                (tr!("没有符合条件的任务"), tr!("试试其他分类或搜索词"))
             } else {
-                ("暂无下载任务", "复制下载链接、在此按 Ctrl+V 粘贴，或使用浏览器扩展")
+                (tr!("暂无下载任务"), tr!("复制下载链接、在此按 Ctrl+V 粘贴，或使用浏览器扩展"))
             };
             ui.label(RichText::new(title).font(bold(16.0)).color(p.text));
             ui.label(RichText::new(sub).size(13.0).color(p.weak));
             if !filtered {
                 ui.add_space(14.0);
-                if button(ui, Btn::Primary, Some(Icon::Plus), "新建下载").clicked() {
+                if button(ui, Btn::Primary, Some(Icon::Plus), tr!("新建下载")).clicked() {
                     self.open_add(ui.ctx(), vec![]);
                 }
             }
@@ -765,15 +767,15 @@ impl App {
                 });
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if icon_button(ui, Icon::Copy, "复制链接", true).clicked() {
+                if icon_button(ui, Icon::Copy, tr!("复制链接"), true).clicked() {
                     *self.m.clip_ignore.lock().unwrap() = url.clone();
                     ui.ctx().copy_text(url.clone());
                 }
                 let folder = if st == Status::Done { t.final_path() } else { t.part_path() };
-                if icon_button(ui, Icon::Folder, "打开所在文件夹", true).clicked() {
+                if icon_button(ui, Icon::Folder, tr!("打开所在文件夹"), true).clicked() {
                     open_path(&folder, true);
                 }
-                if icon_button(ui, Icon::External, "打开文件", st == Status::Done).clicked() {
+                if icon_button(ui, Icon::External, tr!("打开文件"), st == Status::Done).clicked() {
                     open_path(&t.final_path(), false);
                 }
             });
@@ -790,31 +792,31 @@ impl App {
         ui.columns(2, |c| {
             c[0].spacing_mut().item_spacing.y = 4.0;
             c[1].spacing_mut().item_spacing.y = 4.0;
-            kv(&mut c[0], "保存位置", dir.display().to_string());
-            kv(&mut c[0], "下载链接", url.clone());
-            kv(&mut c[0], "添加时间", fmt_ago(created));
-            let total = size.map(fmt_size).unwrap_or_else(|| "未知".into());
-            kv(&mut c[1], "进度", format!("{} / {}", fmt_size(t.downloaded.load(Relaxed)), total));
+            kv(&mut c[0], tr!("保存位置"), dir.display().to_string());
+            kv(&mut c[0], tr!("下载链接"), url.clone());
+            kv(&mut c[0], tr!("添加时间"), fmt_ago(created));
+            let total = size.map(fmt_size).unwrap_or_else(|| tr!("未知").into());
+            kv(&mut c[1], tr!("进度"), format!("{} / {}", fmt_size(t.downloaded.load(Relaxed)), total));
             let lim = t.conn_limit.load(Relaxed);
             let conns = if lim < t.conns && st == Status::Running {
-                format!("{} / {}（服务器限流，已降至 {lim}）", t.active_conns.load(Relaxed), t.conns)
+                trf!("{} / {}（服务器限流，已降至 {}）", t.active_conns.load(Relaxed), t.conns, lim)
             } else {
                 format!("{} / {}", t.active_conns.load(Relaxed), t.conns)
             };
-            kv(&mut c[1], "连接数", conns);
+            kv(&mut c[1], tr!("连接数"), conns);
             if let Some(h) = &hls {
-                let mut kind = vec!["HLS 流媒体"];
+                let mut kind = vec![tr!("HLS 流媒体")];
                 if h.encrypted {
-                    kind.push("AES-128 加密");
+                    kind.push(tr!("AES-128 加密"));
                 }
                 if h.fmp4 {
                     kind.push("fMP4");
                 }
                 let mins = h.duration as u64 / 60;
-                kv(&mut c[0], "类型", format!("{}    时长 {}:{:02}", kind.join("  "), mins, h.duration as u64 % 60));
-                kv(&mut c[1], "分片", format!("{} / {}", t.seg_done.load(Relaxed), h.total));
+                kv(&mut c[0], tr!("类型"), trf!("{}    时长 {}:{}", kind.join("  "), mins, format!("{:02}", h.duration as u64 % 60)));
+                kv(&mut c[1], tr!("分片"), format!("{} / {}", t.seg_done.load(Relaxed), h.total));
             } else {
-                kv(&mut c[1], "断点续传", if !probed { "未知" } else if resumable { "支持" } else { "不支持" }.into());
+                kv(&mut c[1], tr!("断点续传"), if !probed { tr!("未知") } else if resumable { tr!("支持") } else { tr!("不支持") }.into());
             }
         });
         if let Some(note) = hls.as_ref().and_then(|h| h.note.clone()) {
@@ -829,7 +831,7 @@ impl App {
                 ui.add_sized([64.0, 22.0], egui::Label::new(RichText::new("SHA-256").size(12.5).color(p.weak)));
                 if hashing {
                     ui.add(egui::Spinner::new().size(13.0));
-                    ui.label(RichText::new("正在计算").size(13.0).color(p.weak));
+                    ui.label(RichText::new(tr!("正在计算")).size(13.0).color(p.weak));
                 } else if let Some(h) = &hash {
                     let matched = expect.as_ref().map(|e| e.eq_ignore_ascii_case(h));
                     let c = match matched {
@@ -838,15 +840,15 @@ impl App {
                         None => p.text,
                     };
                     ui.add(egui::Label::new(RichText::new(h).monospace().size(12.0).color(c)).truncate());
-                    if icon_button(ui, Icon::Copy, "复制", true).clicked() {
+                    if icon_button(ui, Icon::Copy, tr!("复制"), true).clicked() {
                         ui.ctx().copy_text(h.clone());
                     }
                 } else if st == Status::Done {
-                    if button(ui, Btn::Secondary, Some(Icon::Check), "计算").clicked() {
+                    if button(ui, Btn::Secondary, Some(Icon::Check), tr!("计算")).clicked() {
                         self.m.hash_task(t.id);
                     }
                 } else if let Some(e) = &expect {
-                    ui.label(RichText::new(format!("完成后校验：{e}")).size(12.5).color(p.weak));
+                    ui.label(RichText::new(trf!("完成后校验：{}", e)).size(12.5).color(p.weak));
                 }
             });
         }
@@ -942,8 +944,8 @@ impl App {
         if let Some(r) = result {
             match r {
                 Ok(Some(rel)) => self.update = Some(rel),
-                Ok(None) if force => self.toast(None, ToastKind::Ok, "已是最新版本", format!("当前版本 v{}", env!("CARGO_PKG_VERSION"))),
-                Err(e) if force => self.toast(None, ToastKind::Err, "检查更新失败", e),
+                Ok(None) if force => self.toast(None, ToastKind::Ok, tr!("已是最新版本"), trf!("当前版本 v{}", env!("CARGO_PKG_VERSION"))),
+                Err(e) if force => self.toast(None, ToastKind::Err, tr!("检查更新失败"), e),
                 _ => {}
             }
         }
@@ -987,21 +989,21 @@ impl App {
                 ui.horizontal(|ui| {
                     let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
                     icons::paint(ui.painter(), r, Icon::Download, p.accent);
-                    ui.label(RichText::new(format!("发现新版本 v{}", rel.version)).font(bold(14.0)).color(p.text));
-                    ui.label(RichText::new(format!("当前 v{}", env!("CARGO_PKG_VERSION"))).size(12.5).color(p.weak));
+                    ui.label(RichText::new(trf!("发现新版本 v{}", rel.version)).font(bold(14.0)).color(p.text));
+                    ui.label(RichText::new(trf!("当前 v{}", env!("CARGO_PKG_VERSION"))).size(12.5).color(p.weak));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| match &job {
                         UpdateJob::Downloading | UpdateJob::Ready(_) => {
-                            ui.label(RichText::new("正在下载并校验更新").size(12.5).color(p.weak));
+                            ui.label(RichText::new(tr!("正在下载并校验更新")).size(12.5).color(p.weak));
                             ui.add(egui::Spinner::new().size(14.0));
                         }
                         _ => {
-                            if button(ui, Btn::Primary, Some(Icon::Download), "立即更新").clicked() {
+                            if button(ui, Btn::Primary, Some(Icon::Download), tr!("立即更新")).clicked() {
                                 self.start_update();
                             }
-                            if button(ui, Btn::Secondary, None, "查看更新内容").clicked() {
+                            if button(ui, Btn::Secondary, None, tr!("查看更新内容")).clicked() {
                                 let _ = std::process::Command::new("explorer").arg(&rel.page).spawn();
                             }
-                            if button(ui, Btn::Secondary, None, "忽略此版本").clicked() {
+                            if button(ui, Btn::Secondary, None, tr!("忽略此版本")).clicked() {
                                 let mut s = self.m.settings.read().unwrap().clone();
                                 s.skip_version = rel.version.clone();
                                 self.m.apply_settings(s);
@@ -1046,9 +1048,9 @@ impl App {
             self.tray_tip.1 = Instant::now();
             let speed: u64 = running.iter().map(|r| r.speed).sum();
             let tip = if running.is_empty() {
-                "SwiftDL 下载器  空闲".to_string()
+                tr!("SwiftDL 下载器  空闲").to_string()
             } else {
-                format!("SwiftDL 下载器\n下载中 {} 个  {}", running.len(), fmt_speed(speed))
+                trf!("SwiftDL 下载器\n下载中 {} 个  {}", running.len(), fmt_speed(speed))
             };
             if tip != self.tray_tip.0 {
                 let _ = tray.icon.set_tooltip(Some(&tip));
@@ -1069,8 +1071,8 @@ impl App {
         let card = Rect::from_center_size(rect.center(), vec2(380.0, 180.0));
         painter.rect(card, 16, p.panel, Stroke::new(2.0, p.accent), StrokeKind::Inside);
         icons::paint(&painter, Rect::from_center_size(card.center() - vec2(0.0, 28.0), vec2(40.0, 40.0)), Icon::Download, p.accent);
-        painter.text(card.center() + vec2(0.0, 24.0), Align2::CENTER_CENTER, "松开鼠标添加下载", bold(17.0), p.text);
-        painter.text(card.center() + vec2(0.0, 52.0), Align2::CENTER_CENTER, "支持链接、文本、.txt 链接列表、.url 快捷方式", prop(12.5), p.weak);
+        painter.text(card.center() + vec2(0.0, 24.0), Align2::CENTER_CENTER, tr!("松开鼠标添加下载"), bold(17.0), p.text);
+        painter.text(card.center() + vec2(0.0, 52.0), Align2::CENTER_CENTER, tr!("支持链接、文本、.txt 链接列表、.url 快捷方式"), prop(12.5), p.weak);
         ctx.request_repaint_after(Duration::from_millis(100));
     }
 
@@ -1173,7 +1175,7 @@ impl eframe::App for App {
             if !s.ext_guide_done {
                 s.ext_guide_done = true;
                 self.m.apply_settings(s);
-                self.toast(None, ToastKind::Ok, "浏览器扩展已连接", "浏览器中的下载将自动交给 SwiftDL".into());
+                self.toast(None, ToastKind::Ok, tr!("浏览器扩展已连接"), tr!("浏览器中的下载将自动交给 SwiftDL").into());
             }
         }
         let cmds: Vec<TrayCmd> = self.tray.as_ref().map(|t| t.rx.try_iter().collect()).unwrap_or_default();
@@ -1360,7 +1362,7 @@ fn paint_row(ui: &Ui, p: &Pal, card: Rect, r: &Row, selected: bool, hovered: boo
 
     // 第一行：文件名 + 右侧速度/状态
     let right1 = if st == Status::Running {
-        let txt = if speed > 0 { fmt_speed(speed) } else { "连接中".into() };
+        let txt = if speed > 0 { fmt_speed(speed) } else { tr!("连接中").into() };
         let g = painter.layout_no_wrap(txt, bold(13.5), p.text);
         let w = g.size().x;
         painter.galley(pos2(xr - w, y1 - g.size().y / 2.0), g, p.text);
@@ -1400,8 +1402,8 @@ fn paint_row(ui: &Ui, p: &Pal, card: Rect, r: &Row, selected: bool, hovered: boo
     let info = match (st, size) {
         _ if hls.is_some() => {
             let (d, n) = hls.unwrap_or_default();
-            let est = est_total.map(|e| format!("（约 {}）", fmt_size(e))).unwrap_or_default();
-            format!("第 {d} / {n} 段    {}{est}", fmt_size(done))
+            let est = est_total.map(|e| trf!("（约 {}）", fmt_size(e))).unwrap_or_default();
+            trf!("第 {} / {} 段    {}{}", d, n, fmt_size(done), est)
         }
         (Status::Done, Some(s)) => fmt_size(s),
         (_, Some(s)) => format!("{:.1}%    {} / {}", frac * 100.0, fmt_size(done), fmt_size(s)),
@@ -1413,7 +1415,7 @@ fn paint_row(ui: &Ui, p: &Pal, card: Rect, r: &Row, selected: bool, hovered: boo
         Status::Running => size
             .or(est_total)
             .filter(|_| speed > 0)
-            .map(|s| format!("剩余 {}", fmt_eta(s.saturating_sub(done) / speed)))
+            .map(|s| trf!("剩余 {}", fmt_eta(s.saturating_sub(done) / speed)))
             .unwrap_or_default(),
         Status::Done => fmt_ago(r.finished),
         Status::Error => r.error.clone().map(|e| e.chars().take(28).collect()).unwrap_or_default(),

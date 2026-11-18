@@ -28,6 +28,7 @@ globalThis.chrome = {
   downloads: { onCreated: on("dlCreated") },
   contextMenus: { create() {}, onClicked: on("menu") },
   cookies: { getAll: async () => [{ name: "sid", value: "abc" }] },
+  i18n: { getMessage: (k) => ({ unpairedError: "未配对：请在扩展弹窗中填写配对令牌", menuDownload: "使用 SwiftDL 下载" })[k] || "" },
 };
 globalThis.fetch = async (url, opt = {}) => {
   if (url === "https://cdn.com/v/master.m3u8") {

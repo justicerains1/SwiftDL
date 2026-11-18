@@ -19,10 +19,10 @@ pub struct Tray {
 
 /// 必须在主线程（窗口事件循环所在线程）创建
 pub fn create(ctx: &egui::Context) -> Option<Tray> {
-    let show = MenuItem::new("显示窗口", true, None);
-    let start = MenuItem::new("全部开始", true, None);
-    let pause = MenuItem::new("全部暂停", true, None);
-    let quit = MenuItem::new("退出 SwiftDL", true, None);
+    let show = MenuItem::new(tr!("显示窗口"), true, None);
+    let start = MenuItem::new(tr!("全部开始"), true, None);
+    let pause = MenuItem::new(tr!("全部暂停"), true, None);
+    let quit = MenuItem::new(tr!("退出 SwiftDL"), true, None);
     let menu = Menu::new();
     menu.append_items(&[
         &show,
@@ -38,7 +38,7 @@ pub fn create(ctx: &egui::Context) -> Option<Tray> {
     let icon = tray_icon::Icon::from_rgba(data.rgba, data.width, data.height).ok()?;
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_tooltip("SwiftDL 下载器")
+        .with_tooltip(tr!("SwiftDL 下载器"))
         .with_icon(icon)
         .with_menu_on_left_click(false)
         .build()

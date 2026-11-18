@@ -50,7 +50,7 @@ fn header(ui: &mut Ui, p: &Pal, icon: Icon, color: Color32, title: &str) -> bool
         ui.add_space(4.0);
         ui.label(RichText::new(title).font(bold(17.0)).color(p.text));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            close = icon_button(ui, Icon::X, "关闭（Esc）", true).clicked();
+            close = icon_button(ui, Icon::X, tr!("关闭（Esc）"), true).clicked();
         });
     });
     ui.add_space(14.0);
@@ -230,16 +230,16 @@ impl AddDialog {
         self.auto_probe(m);
         let mut result = DialogResult::None;
         let outside = modal(ctx, "add_dialog", 600.0, |ui, p| {
-            if header(ui, p, Icon::Download, p.accent, "新建下载") {
+            if header(ui, p, Icon::Download, p.accent, tr!("新建下载")) {
                 result = DialogResult::Close;
             }
-            ui.label(RichText::new("下载链接").color(p.text));
+            ui.label(RichText::new(tr!("下载链接")).color(p.text));
             let te = ui.add(
                 egui::TextEdit::multiline(&mut self.urls)
                     .desired_rows(3)
                     .desired_width(f32::INFINITY)
                     .margin(Margin::symmetric(10, 8))
-                    .hint_text("粘贴下载链接，每行一个"),
+                    .hint_text(tr!("粘贴下载链接，每行一个")),
             );
             if self.focus {
                 te.request_focus();
@@ -273,7 +273,7 @@ impl AddDialog {
                                         .add(
                                             egui::TextEdit::singleline(&mut self.name)
                                                 .desired_width(ui.available_width())
-                                                .hint_text("文件名（自动识别）"),
+                                                .hint_text(tr!("文件名（自动识别）")),
                                         )
                                         .changed()
                                     {
@@ -282,14 +282,14 @@ impl AddDialog {
                                     ui.horizontal(|ui| match &self.info {
                                         None => {
                                             ui.add(egui::Spinner::new().size(12.0));
-                                            ui.label(RichText::new("正在获取文件信息").size(12.5).color(p.weak));
+                                            ui.label(RichText::new(tr!("正在获取文件信息")).size(12.5).color(p.weak));
                                         }
                                         Some(Ok(i)) if i.hls.is_some() => {
                                             let h = i.hls.as_ref().unwrap();
                                             let mins = h.duration as u64 / 60;
-                                            let mut t = format!("HLS 视频流  {} 段  时长 {}:{:02}", h.segments, mins, h.duration as u64 % 60);
+                                            let mut t = trf!("HLS 视频流  {} 段  时长 {}:{}", h.segments, mins, format!("{:02}", h.duration as u64 % 60));
                                             if h.encrypted {
-                                                t.push_str("  已加密");
+                                                t.push_str(tr!("  已加密"));
                                             }
                                             ui.label(RichText::new(t).size(12.5).color(p.text));
                                             if h.variants.len() > 1 {
@@ -301,22 +301,22 @@ impl AddDialog {
                                                 });
                                             }
                                             if h.drm {
-                                                ui.label(RichText::new("受 DRM 保护，无法下载").size(12.5).color(p.danger));
+                                                ui.label(RichText::new(tr!("受 DRM 保护，无法下载")).size(12.5).color(p.danger));
                                             } else if h.live {
-                                                ui.label(RichText::new("直播流暂不支持").size(12.5).color(p.warning));
+                                                ui.label(RichText::new(tr!("直播流暂不支持")).size(12.5).color(p.warning));
                                             }
                                         }
                                         Some(Ok(i)) => {
-                                            let sz = i.size.map(fmt_size).unwrap_or_else(|| "大小未知".into());
+                                            let sz = i.size.map(fmt_size).unwrap_or_else(|| tr!("大小未知").into());
                                             ui.label(RichText::new(sz).size(12.5).color(p.text));
                                             let (t, c) =
-                                                if i.resumable { ("支持断点续传", p.success) } else { ("不支持断点续传", p.warning) };
+                                                if i.resumable { (tr!("支持断点续传"), p.success) } else { (tr!("不支持断点续传"), p.warning) };
                                             ui.label(RichText::new(t).size(12.5).color(c));
                                         }
                                         Some(Err(e)) => {
                                             ui.add(
                                                 egui::Label::new(
-                                                    RichText::new(format!("获取失败：{e}")).size(12.5).color(p.danger),
+                                                    RichText::new(trf!("获取失败：{}", e)).size(12.5).color(p.danger),
                                                 )
                                                 .truncate(),
                                             );
@@ -328,37 +328,37 @@ impl AddDialog {
                             ui.horizontal(|ui| {
                                 let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
                                 icons::paint(ui.painter(), r, Icon::Copy, p.accent);
-                                ui.label(RichText::new(format!("共 {n} 个链接，将按服务器提供的文件名保存")).color(p.text));
+                                ui.label(RichText::new(trf!("共 {} 个链接，将按服务器提供的文件名保存", n)).color(p.text));
                             });
                         }
                         if !dups.is_empty() {
                             ui.add_space(6.0);
                             let txt = if n == 1 {
-                                format!("该链接已在下载列表中（{}），仍可再次下载", dups[0].label())
+                                trf!("该链接已在下载列表中（{}），仍可再次下载", dups[0].label())
                             } else {
-                                format!("其中 {} 个链接已在下载列表中，仍可再次下载", dups.len())
+                                trf!("其中 {} 个链接已在下载列表中，仍可再次下载", dups.len())
                             };
                             status_line(ui, Icon::Alert, p.warning, &txt);
                         }
                     });
                 ui.add_space(10.0);
             }
-            row(ui, p, "保存到", |ui| {
+            row(ui, p, tr!("保存到"), |ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.dir).desired_width(ui.available_width() - 40.0));
-                if icon_button(ui, Icon::Folder, "选择文件夹", true).clicked()
+                if icon_button(ui, Icon::Folder, tr!("选择文件夹"), true).clicked()
                     && let Some(d) = rfd::FileDialog::new().set_directory(&self.dir).pick_folder()
                 {
                     self.dir = d.display().to_string();
                 }
             });
-            row(ui, p, "连接数", |ui| {
+            row(ui, p, tr!("连接数"), |ui| {
                 ui.add(egui::Slider::new(&mut self.conns, 1..=32));
             });
             row(ui, p, "SHA-256", |ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.sha256)
                         .desired_width(ui.available_width())
-                        .hint_text("可选，填写后完成时自动校验"),
+                        .hint_text(tr!("可选，填写后完成时自动校验")),
                 );
             });
             ui.add_space(6.0);
@@ -366,7 +366,7 @@ impl AddDialog {
             footer(ui, |ui| {
                 let ok = n > 0;
                 if ui
-                    .add_enabled_ui(ok, |ui| button(ui, Btn::Primary, Some(Icon::Download), "开始下载"))
+                    .add_enabled_ui(ok, |ui| button(ui, Btn::Primary, Some(Icon::Download), tr!("开始下载")))
                     .inner
                     .on_hover_text("Ctrl+Enter")
                     .clicked()
@@ -374,17 +374,17 @@ impl AddDialog {
                     go = Some(StartMode::Now);
                 }
                 if ui
-                    .add_enabled_ui(ok, |ui| button(ui, Btn::Secondary, Some(Icon::Clock), "计划下载"))
+                    .add_enabled_ui(ok, |ui| button(ui, Btn::Secondary, Some(Icon::Clock), tr!("计划下载")))
                     .inner
-                    .on_hover_text("按设置中的计划时间自动开始")
+                    .on_hover_text(tr!("按设置中的计划时间自动开始"))
                     .clicked()
                 {
                     go = Some(StartMode::Scheduled);
                 }
-                if ui.add_enabled_ui(ok, |ui| button(ui, Btn::Secondary, None, "稍后下载")).inner.clicked() {
+                if ui.add_enabled_ui(ok, |ui| button(ui, Btn::Secondary, None, tr!("稍后下载"))).inner.clicked() {
                     go = Some(StartMode::Later);
                 }
-                if button(ui, Btn::Secondary, None, "取消").clicked() {
+                if button(ui, Btn::Secondary, None, tr!("取消")).clicked() {
                     result = DialogResult::Close;
                 }
             });
@@ -442,171 +442,176 @@ impl SettingsDialog {
         let mut result = DialogResult::None;
         let max_h = (ctx.content_rect().height() - 200.0).clamp(240.0, 600.0);
         let outside = modal(ctx, "settings", 580.0, |ui, p| {
-            if header(ui, p, Icon::Settings, p.accent, "设置") {
+            if header(ui, p, Icon::Settings, p.accent, tr!("设置")) {
                 result = DialogResult::Close;
             }
             let s = &mut self.s;
             egui::ScrollArea::vertical().max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
-                section(ui, p, "常规", |ui| {
-                    row(ui, p, "默认保存目录", |ui| {
+                section(ui, p, tr!("常规"), |ui| {
+                    row(ui, p, tr!("默认保存目录"), |ui| {
                         let mut d = s.dir.display().to_string();
                         if ui.add(egui::TextEdit::singleline(&mut d).desired_width(ui.available_width() - 40.0)).changed() {
                             s.dir = d.into();
                         }
-                        if icon_button(ui, Icon::Folder, "选择文件夹", true).clicked()
+                        if icon_button(ui, Icon::Folder, tr!("选择文件夹"), true).clicked()
                             && let Some(d) = rfd::FileDialog::new().set_directory(&s.dir).pick_folder()
                         {
                             s.dir = d;
                         }
                     });
-                    row(ui, p, "按类型分类", |ui| {
-                        ui.checkbox(&mut s.categorize, "存入默认目录下的 压缩文件、视频、音乐、文档、程序 等子目录");
+                    row(ui, p, tr!("按类型分类"), |ui| {
+                        ui.checkbox(&mut s.categorize, tr!("存入默认目录下的 压缩文件、视频、音乐、文档、程序 等子目录"));
                     });
-                    row(ui, p, "外观", |ui| {
-                        segmented(ui, p, &mut s.theme, &[(ThemeMode::System, "跟随系统"), (ThemeMode::Light, "浅色"), (ThemeMode::Dark, "深色")]);
+                    row(ui, p, tr!("语言"), |ui| {
+                        use crate::i18n::LangSetting;
+                        segmented(ui, p, &mut s.lang, &[(LangSetting::System, tr!("跟随系统")), (LangSetting::Zh, "中文"), (LangSetting::En, "English")]);
+                    });
+                    hint(ui, p, tr!("托盘菜单在重启后切换语言"));
+                    row(ui, p, tr!("外观"), |ui| {
+                        segmented(ui, p, &mut s.theme, &[(ThemeMode::System, tr!("跟随系统")), (ThemeMode::Light, tr!("浅色")), (ThemeMode::Dark, tr!("深色"))]);
                     });
                 });
-                section(ui, p, "下载", |ui| {
-                    row(ui, p, "每任务连接数", |ui| {
+                section(ui, p, tr!("下载"), |ui| {
+                    row(ui, p, tr!("每任务连接数"), |ui| {
                         ui.add(egui::Slider::new(&mut s.conns, 1..=32));
                     });
-                    row(ui, p, "同时下载任务", |ui| {
+                    row(ui, p, tr!("同时下载任务"), |ui| {
                         ui.add(egui::Slider::new(&mut s.max_active, 1..=10));
                     });
-                    row(ui, p, "全局限速", |ui| {
+                    row(ui, p, tr!("全局限速"), |ui| {
                         ui.add(egui::DragValue::new(&mut s.speed_limit_kb).speed(64).range(0..=10_000_000).suffix(" KB/s"));
-                        hint(ui, p, "0 表示不限速");
+                        hint(ui, p, tr!("0 表示不限速"));
                     });
-                    row(ui, p, "m3u8 转 MP4", |ui| {
-                        ui.checkbox(&mut s.hls_mp4, "流媒体下载完成后用 ffmpeg 无损转为 MP4");
+                    row(ui, p, tr!("m3u8 转 MP4"), |ui| {
+                        ui.checkbox(&mut s.hls_mp4, tr!("流媒体下载完成后用 ffmpeg 无损转为 MP4"));
                     });
-                    row(ui, p, "ffmpeg 路径", |ui| {
+                    row(ui, p, tr!("ffmpeg 路径"), |ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut s.ffmpeg)
                                 .desired_width(ui.available_width() - 40.0)
-                                .hint_text("留空自动查找"),
+                                .hint_text(tr!("留空自动查找")),
                         );
-                        if icon_button(ui, Icon::Folder, "选择 ffmpeg.exe", true).clicked()
+                        if icon_button(ui, Icon::Folder, tr!("选择 ffmpeg.exe"), true).clicked()
                             && let Some(f) = rfd::FileDialog::new().add_filter("ffmpeg", &["exe"]).pick_file()
                         {
                             s.ffmpeg = f.display().to_string();
                         }
                     });
                     match crate::engine::hls::find_ffmpeg(&s.ffmpeg) {
-                        Some(f) => status_line(ui, Icon::Check, p.success, &format!("已找到 ffmpeg：{}", f.display())),
-                        None => status_line(ui, Icon::Alert, p.weak, "未找到 ffmpeg，m3u8 视频将保存为 .ts（可正常播放）"),
+                        Some(f) => status_line(ui, Icon::Check, p.success, &trf!("已找到 ffmpeg：{}", f.display())),
+                        None => status_line(ui, Icon::Alert, p.weak, tr!("未找到 ffmpeg，m3u8 视频将保存为 .ts（可正常播放）")),
                     }
-                    row(ui, p, "出错自动重试", |ui| {
-                        ui.add(egui::DragValue::new(&mut s.auto_retry).range(0..=20).suffix(" 次"));
-                        hint(ui, p, "每次间隔 30 秒，0 表示不重试");
+                    row(ui, p, tr!("出错自动重试"), |ui| {
+                        ui.add(egui::DragValue::new(&mut s.auto_retry).range(0..=20).suffix(tr!(" 次")));
+                        hint(ui, p, tr!("每次间隔 30 秒，0 表示不重试"));
                     });
                 });
-                section(ui, p, "计划任务", |ui| {
-                    row(ui, p, "启用计划", |ui| {
-                        ui.checkbox(&mut s.schedule.enabled, "每天按时自动开始“计划下载”的任务");
+                section(ui, p, tr!("计划任务"), |ui| {
+                    row(ui, p, tr!("启用计划"), |ui| {
+                        ui.checkbox(&mut s.schedule.enabled, tr!("每天按时自动开始“计划下载”的任务"));
                     });
-                    row(ui, p, "开始时间", |ui| {
+                    row(ui, p, tr!("开始时间"), |ui| {
                         ui.add(egui::TextEdit::singleline(&mut s.schedule.start).desired_width(70.0).hint_text("02:00"));
-                        ui.label(RichText::new("停止时间").color(p.text));
-                        ui.add(egui::TextEdit::singleline(&mut s.schedule.stop).desired_width(70.0).hint_text("可留空"));
+                        ui.label(RichText::new(tr!("停止时间")).color(p.text));
+                        ui.add(egui::TextEdit::singleline(&mut s.schedule.stop).desired_width(70.0).hint_text(tr!("可留空")));
                     });
                     let bad_start = sched::parse_hm(&s.schedule.start).is_none();
                     let bad_stop = !s.schedule.stop.trim().is_empty() && sched::parse_hm(&s.schedule.stop).is_none();
                     if s.schedule.enabled && (bad_start || bad_stop) {
-                        status_line(ui, Icon::Alert, p.danger, "时间格式应为 HH:MM，例如 02:30");
+                        status_line(ui, Icon::Alert, p.danger, tr!("时间格式应为 HH:MM，例如 02:30"));
                     } else {
-                        hint(ui, p, "停止时间留空表示不自动暂停；开始晚于停止表示跨午夜");
+                        hint(ui, p, tr!("停止时间留空表示不自动暂停；开始晚于停止表示跨午夜"));
                     }
                 });
-                section(ui, p, "网络", |ui| {
-                    row(ui, p, "代理", |ui| {
+                section(ui, p, tr!("网络"), |ui| {
+                    row(ui, p, tr!("代理"), |ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut s.proxy)
                                 .desired_width(ui.available_width())
                                 .hint_text("http://127.0.0.1:10808"),
                         );
                     });
-                    hint(ui, p, "留空使用系统代理，填 direct 直连，支持 http:// 与 socks5://");
+                    hint(ui, p, tr!("留空使用系统代理，填 direct 直连，支持 http:// 与 socks5://"));
                 });
-                section(ui, p, "托盘与启动", |ui| {
-                    row(ui, p, "关闭窗口", |ui| {
-                        ui.checkbox(&mut s.close_to_tray, "最小化到系统托盘，后台继续下载");
+                section(ui, p, tr!("托盘与启动"), |ui| {
+                    row(ui, p, tr!("关闭窗口"), |ui| {
+                        ui.checkbox(&mut s.close_to_tray, tr!("最小化到系统托盘，后台继续下载"));
                     });
-                    row(ui, p, "开机自启动", |ui| {
-                        ui.checkbox(&mut s.autostart, "登录 Windows 后自动启动并最小化到托盘");
+                    row(ui, p, tr!("开机自启动"), |ui| {
+                        ui.checkbox(&mut s.autostart, tr!("登录 Windows 后自动启动并最小化到托盘"));
                     });
                 });
-                section(ui, p, "剪贴板与浏览器", |ui| {
-                    row(ui, p, "浏览器扩展", |ui| {
+                section(ui, p, tr!("剪贴板与浏览器"), |ui| {
+                    row(ui, p, tr!("浏览器扩展"), |ui| {
                         if browser::connected() {
-                            status_line(ui, Icon::Check, p.success, "已连接");
+                            status_line(ui, Icon::Check, p.success, tr!("已连接"));
                         } else {
-                            status_line(ui, Icon::Alert, p.weak, "本次运行尚未检测到");
+                            status_line(ui, Icon::Alert, p.weak, tr!("本次运行尚未检测到"));
                         }
-                        if button(ui, Btn::Secondary, Some(Icon::External), "安装向导").clicked() {
+                        if button(ui, Btn::Secondary, Some(Icon::External), tr!("安装向导")).clicked() {
                             result = DialogResult::OpenExtGuide;
                         }
                     });
-                    row(ui, p, "剪贴板监听", |ui| {
-                        ui.checkbox(&mut s.clipboard, "复制下载链接时自动弹出新建窗口");
+                    row(ui, p, tr!("剪贴板监听"), |ui| {
+                        ui.checkbox(&mut s.clipboard, tr!("复制下载链接时自动弹出新建窗口"));
                     });
-                    row(ui, p, "监听扩展名", |ui| {
+                    row(ui, p, tr!("监听扩展名"), |ui| {
                         ui.add(egui::TextEdit::multiline(&mut s.exts).desired_rows(2).desired_width(ui.available_width()));
                     });
-                    row(ui, p, "扩展端口", |ui| {
+                    row(ui, p, tr!("扩展端口"), |ui| {
                         ui.add(egui::DragValue::new(&mut s.port).range(1024..=65535));
-                        hint(ui, p, "重启后生效");
+                        hint(ui, p, tr!("重启后生效"));
                     });
                 });
-                section(ui, p, "安全与隐私", |ui| {
-                    row(ui, p, "删除文件", |ui| {
-                        ui.checkbox(&mut s.recycle, "移到回收站（可恢复）");
+                section(ui, p, tr!("安全与隐私"), |ui| {
+                    row(ui, p, tr!("删除文件"), |ui| {
+                        ui.checkbox(&mut s.recycle, tr!("移到回收站（可恢复）"));
                     });
-                    row(ui, p, "来源标记", |ui| {
-                        ui.checkbox(&mut s.motw, "为下载的文件标记“来自 Internet”，打开时由系统安全检查");
+                    row(ui, p, tr!("来源标记"), |ui| {
+                        ui.checkbox(&mut s.motw, tr!("为下载的文件标记“来自 Internet”，打开时由系统安全检查"));
                     });
-                    row(ui, p, "扩展配对令牌", |ui| {
+                    row(ui, p, tr!("扩展配对令牌"), |ui| {
                         let shown = format!("{}...{}", &s.token[..4.min(s.token.len())], &s.token[s.token.len().saturating_sub(4)..]);
                         ui.label(RichText::new(shown).monospace().color(p.text));
-                        if button(ui, Btn::Secondary, Some(Icon::Copy), "复制").clicked() {
+                        if button(ui, Btn::Secondary, Some(Icon::Copy), tr!("复制")).clicked() {
                             ui.ctx().copy_text(s.token.clone());
                         }
-                        if button(ui, Btn::Secondary, Some(Icon::Refresh), "重新生成").on_hover_text("旧令牌立即失效；通过安装向导加载的扩展会自动更新").clicked() {
+                        if button(ui, Btn::Secondary, Some(Icon::Refresh), tr!("重新生成")).on_hover_text(tr!("旧令牌立即失效；通过安装向导加载的扩展会自动更新")).clicked() {
                             s.token = crate::engine::sys::random_token();
                         }
                     });
-                    hint(ui, p, "浏览器扩展需携带令牌才能投递任务，防止网页或同机其他用户冒用");
+                    hint(ui, p, tr!("浏览器扩展需携带令牌才能投递任务，防止网页或同机其他用户冒用"));
                 });
-                section(ui, p, "更新", |ui| {
-                    row(ui, p, "当前版本", |ui| {
+                section(ui, p, tr!("更新"), |ui| {
+                    row(ui, p, tr!("当前版本"), |ui| {
                         ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).color(p.text));
-                        if button(ui, Btn::Secondary, Some(Icon::Refresh), "检查更新").clicked() {
+                        if button(ui, Btn::Secondary, Some(Icon::Refresh), tr!("检查更新")).clicked() {
                             result = DialogResult::CheckUpdate;
                         }
                     });
-                    row(ui, p, "自动检查", |ui| {
-                        ui.checkbox(&mut s.auto_update, "每天检查一次新版本（下载后校验 SHA-256 再替换）");
+                    row(ui, p, tr!("自动检查"), |ui| {
+                        ui.checkbox(&mut s.auto_update, tr!("每天检查一次新版本（下载后校验 SHA-256 再替换）"));
                     });
                 });
-                section(ui, p, "存储与缓存", |ui| {
-                    row(ui, p, "自动清理记录", |ui| {
-                        ui.add(egui::DragValue::new(&mut s.clean_done_days).range(0..=3650).suffix(" 天"));
-                        hint(ui, p, "已完成记录保留天数，0 为永久保留");
+                section(ui, p, tr!("存储与缓存"), |ui| {
+                    row(ui, p, tr!("自动清理记录"), |ui| {
+                        ui.add(egui::DragValue::new(&mut s.clean_done_days).range(0..=3650).suffix(tr!(" 天")));
+                        hint(ui, p, tr!("已完成记录保留天数，0 为永久保留"));
                     });
-                    row(ui, p, "临时文件", |ui| {
-                        if button(ui, Btn::Secondary, Some(Icon::Trash), "立即清理缓存").clicked() {
+                    row(ui, p, tr!("临时文件"), |ui| {
+                        if button(ui, Btn::Secondary, Some(Icon::Trash), tr!("立即清理缓存")).clicked() {
                             let mm = m.clone();
                             m.rt.spawn_blocking(move || mm.cleanup());
                             self.cleaned = true;
                         }
                         if self.cleaned {
-                            ui.label(RichText::new("已清理").size(12.5).color(p.success));
+                            ui.label(RichText::new(tr!("已清理")).size(12.5).color(p.success));
                         }
                     });
                 });
             });
             footer(ui, |ui| {
-                if button(ui, Btn::Primary, Some(Icon::Check), "保存").clicked() {
+                if button(ui, Btn::Primary, Some(Icon::Check), tr!("保存")).clicked() {
                     let old_auto = m.settings.read().unwrap().autostart;
                     if self.s.autostart != old_auto && !crate::tray::set_autostart(self.s.autostart) {
                         self.s.autostart = old_auto;
@@ -617,7 +622,7 @@ impl SettingsDialog {
                     m.apply_settings(self.s.clone());
                     result = DialogResult::Close;
                 }
-                if button(ui, Btn::Secondary, None, "取消").clicked() {
+                if button(ui, Btn::Secondary, None, tr!("取消")).clicked() {
                     result = DialogResult::Close;
                 }
             });
@@ -644,19 +649,19 @@ impl DeleteDialog {
     pub fn show(&mut self, ctx: &egui::Context, m: &Arc<Manager>) -> DialogResult {
         let mut result = DialogResult::None;
         let outside = modal(ctx, "delete", 380.0, |ui, p| {
-            if header(ui, p, Icon::Trash, p.danger, "删除任务") {
+            if header(ui, p, Icon::Trash, p.danger, tr!("删除任务")) {
                 result = DialogResult::Close;
             }
-            ui.label(RichText::new(format!("确定删除选中的 {} 个任务吗？", self.ids.len())).color(p.text));
+            ui.label(RichText::new(trf!("确定删除选中的 {} 个任务吗？", self.ids.len())).color(p.text));
             ui.add_space(4.0);
-            ui.checkbox(&mut self.delete_file, "同时删除已下载的文件");
+            ui.checkbox(&mut self.delete_file, tr!("同时删除已下载的文件"));
             ui.add_space(6.0);
             footer(ui, |ui| {
-                if button(ui, Btn::Danger, Some(Icon::Trash), "删除").clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                if button(ui, Btn::Danger, Some(Icon::Trash), tr!("删除")).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
                     m.remove(&self.ids, self.delete_file);
                     result = DialogResult::Close;
                 }
-                if button(ui, Btn::Secondary, None, "取消").clicked() {
+                if button(ui, Btn::Secondary, None, tr!("取消")).clicked() {
                     result = DialogResult::Close;
                 }
             });
@@ -696,11 +701,11 @@ impl RelinkDialog {
         }
         let mut result = DialogResult::None;
         let outside = modal(ctx, "relink", 560.0, |ui, p| {
-            if header(ui, p, Icon::Refresh, p.accent, "更新下载链接") {
+            if header(ui, p, Icon::Refresh, p.accent, tr!("更新下载链接")) {
                 result = DialogResult::Close;
             }
             ui.add(egui::Label::new(RichText::new(&self.name).font(bold(14.0)).color(p.text)).truncate());
-            hint(ui, p, "链接过期或失效时，粘贴同一文件的新链接即可从断点继续下载");
+            hint(ui, p, tr!("链接过期或失效时，粘贴同一文件的新链接即可从断点继续下载"));
             ui.add_space(6.0);
             ui.add(
                 egui::TextEdit::multiline(&mut self.url)
@@ -711,14 +716,14 @@ impl RelinkDialog {
             if self.pending {
                 ui.horizontal(|ui| {
                     ui.add(egui::Spinner::new().size(14.0));
-                    ui.label(RichText::new("正在验证新链接").size(13.0).color(p.weak));
+                    ui.label(RichText::new(tr!("正在验证新链接")).size(13.0).color(p.weak));
                 });
             } else if let Some(e) = &self.err {
                 status_line(ui, Icon::Alert, p.danger, e);
             }
             footer(ui, |ui| {
                 let ok = !self.pending && self.url.trim().starts_with("http");
-                if ui.add_enabled_ui(ok, |ui| button(ui, Btn::Primary, Some(Icon::Refresh), "更新并继续")).inner.clicked() {
+                if ui.add_enabled_ui(ok, |ui| button(ui, Btn::Primary, Some(Icon::Refresh), tr!("更新并继续"))).inner.clicked() {
                     self.pending = true;
                     self.err = None;
                     let (mm, id, url, slot) = (m.clone(), self.id, self.url.trim().to_string(), self.slot.clone());
@@ -728,7 +733,7 @@ impl RelinkDialog {
                         mm.repaint();
                     });
                 }
-                if button(ui, Btn::Secondary, None, "取消").clicked() {
+                if button(ui, Btn::Secondary, None, tr!("取消")).clicked() {
                     result = DialogResult::Close;
                 }
             });
@@ -759,18 +764,18 @@ impl ExtGuide {
         let mut done = false;
         let connected = browser::connected();
         let outside = modal(ctx, "ext_guide", 560.0, |ui, p| {
-            if header(ui, p, Icon::External, p.accent, "安装浏览器扩展") {
+            if header(ui, p, Icon::External, p.accent, tr!("安装浏览器扩展")) {
                 result = DialogResult::Close;
             }
-            ui.label(RichText::new("安装后，浏览器中的下载会自动交给 SwiftDL 多线程加速，并保留登录状态。").color(p.text));
-            hint(ui, p, "Chrome 与 Edge 只允许用户本人加载商店之外的扩展，下面两步即可完成。");
+            ui.label(RichText::new(tr!("安装后，浏览器中的下载会自动交给 SwiftDL 多线程加速，并保留登录状态。")).color(p.text));
+            hint(ui, p, tr!("Chrome 与 Edge 只允许用户本人加载商店之外的扩展，下面两步即可完成。"));
             ui.add_space(10.0);
             if connected {
-                status_line(ui, Icon::Check, p.success, "扩展已连接，安装完成");
+                status_line(ui, Icon::Check, p.success, tr!("扩展已连接，安装完成"));
             } else if self.browsers.is_empty() {
-                status_line(ui, Icon::Alert, p.warning, "未检测到 Chrome 或 Edge，可手动加载扩展文件夹");
+                status_line(ui, Icon::Alert, p.warning, tr!("未检测到 Chrome 或 Edge，可手动加载扩展文件夹"));
                 ui.add_space(6.0);
-                if button(ui, Btn::Primary, Some(Icon::Folder), "打开扩展文件夹").clicked() {
+                if button(ui, Btn::Primary, Some(Icon::Folder), tr!("打开扩展文件夹")).clicked() {
                     let res = {
                         let st = m.settings.read().unwrap();
                         browser::extract(&st.token, st.port)
@@ -780,14 +785,14 @@ impl ExtGuide {
                             ctx.copy_text(dir.display().to_string());
                             let _ = std::process::Command::new("explorer").arg(&dir).spawn();
                         }
-                        Err(e) => self.err = Some(format!("释放扩展失败：{e}")),
+                        Err(e) => self.err = Some(trf!("释放扩展失败：{}", e)),
                     }
                 }
             } else {
                 ui.horizontal(|ui| {
                     for (i, (b, exe)) in self.browsers.clone().into_iter().enumerate() {
                         let kind = if i == 0 { Btn::Primary } else { Btn::Secondary };
-                        let label = format!("在 {} 中安装", if b == Browser::Edge { "Edge" } else { "Chrome" });
+                        let label = trf!("在 {} 中安装", if b == Browser::Edge { "Edge" } else { "Chrome" });
                         if button(ui, kind, Some(Icon::External), &label).on_hover_text(b.name()).clicked() {
                             let res = {
                                 let st = m.settings.read().unwrap();
@@ -799,7 +804,7 @@ impl ExtGuide {
                                     self.launched = Some(b);
                                     self.err = None;
                                 }
-                                Err(e) => self.err = Some(format!("启动浏览器失败：{e}")),
+                                Err(e) => self.err = Some(trf!("启动浏览器失败：{}", e)),
                             }
                         }
                     }
@@ -818,25 +823,25 @@ impl ExtGuide {
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.spacing_mut().item_spacing.y = 10.0;
-                        step(ui, p, 1, "在打开的扩展页面中，开启右上角（Edge 为左下角）的“开发者模式”");
-                        step(ui, p, 2, "把资源管理器中已选中的 extension 文件夹拖到扩展页面上；或点击“加载解压缩的扩展”，按 Ctrl+V 粘贴已复制的路径");
+                        step(ui, p, 1, tr!("在打开的扩展页面中，开启右上角（Edge 为左下角）的“开发者模式”"));
+                        step(ui, p, 2, tr!("把资源管理器中已选中的 extension 文件夹拖到扩展页面上；或点击“加载解压缩的扩展”，按 Ctrl+V 粘贴已复制的路径"));
                         ui.horizontal(|ui| {
                             ui.add(egui::Spinner::new().size(14.0));
-                            ui.label(RichText::new("等待扩展连接，安装完成后会自动提示").size(13.0).color(p.weak));
+                            ui.label(RichText::new(tr!("等待扩展连接，安装完成后会自动提示")).size(13.0).color(p.weak));
                         });
                     });
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
             }
             footer(ui, |ui| {
                 if connected {
-                    if button(ui, Btn::Primary, Some(Icon::Check), "完成").clicked() {
+                    if button(ui, Btn::Primary, Some(Icon::Check), tr!("完成")).clicked() {
                         done = true;
                     }
                 } else {
-                    if button(ui, Btn::Secondary, None, "稍后").clicked() {
+                    if button(ui, Btn::Secondary, None, tr!("稍后")).clicked() {
                         result = DialogResult::Close;
                     }
-                    if button(ui, Btn::Secondary, None, "已安装，不再提示").clicked() {
+                    if button(ui, Btn::Secondary, None, tr!("已安装，不再提示")).clicked() {
                         done = true;
                     }
                 }
@@ -876,17 +881,17 @@ impl CloseAsk {
     pub fn show(&mut self, ctx: &egui::Context) -> CloseChoice {
         let mut choice = CloseChoice::None;
         let outside = modal(ctx, "close_ask", 400.0, |ui, p| {
-            if header(ui, p, Icon::Download, p.accent, "关闭 SwiftDL") {
+            if header(ui, p, Icon::Download, p.accent, tr!("关闭 SwiftDL")) {
                 choice = CloseChoice::Cancel;
             }
-            ui.label(RichText::new("关闭窗口后，是否在系统托盘中继续下载？").color(p.text));
+            ui.label(RichText::new(tr!("关闭窗口后，是否在系统托盘中继续下载？")).color(p.text));
             ui.add_space(4.0);
-            ui.checkbox(&mut self.remember, "记住我的选择（可在设置中修改）");
+            ui.checkbox(&mut self.remember, tr!("记住我的选择（可在设置中修改）"));
             footer(ui, |ui| {
-                if button(ui, Btn::Primary, None, "最小化到托盘").clicked() {
+                if button(ui, Btn::Primary, None, tr!("最小化到托盘")).clicked() {
                     choice = CloseChoice::Tray { remember: self.remember };
                 }
-                if button(ui, Btn::Secondary, None, "退出程序").clicked() {
+                if button(ui, Btn::Secondary, None, tr!("退出程序")).clicked() {
                     choice = CloseChoice::Quit { remember: self.remember };
                 }
             });
@@ -904,10 +909,10 @@ impl CloseAsk {
 pub fn countdown(ctx: &egui::Context, action: &str, remaining: u64) -> Option<bool> {
     let mut r = None;
     let outside = modal(ctx, "countdown", 380.0, |ui, p| {
-        if header(ui, p, Icon::Clock, p.warning, "全部下载已完成") {
+        if header(ui, p, Icon::Clock, p.warning, tr!("全部下载已完成")) {
             r = Some(false);
         }
-        ui.label(RichText::new(format!("{remaining} 秒后将{action}")).font(bold(16.0)).color(p.text));
+        ui.label(RichText::new(trf!("{} 秒后将{}", remaining, action)).font(bold(16.0)).color(p.text));
         let frac = remaining as f32 / 60.0;
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
         ui.painter().rect_filled(rect, 3, p.track);
@@ -915,10 +920,10 @@ pub fn countdown(ctx: &egui::Context, action: &str, remaining: u64) -> Option<bo
         f.max.x = rect.min.x + rect.width() * frac;
         ui.painter().rect_filled(f, 3, p.warning);
         footer(ui, |ui| {
-            if button(ui, Btn::Primary, None, "立即执行").clicked() {
+            if button(ui, Btn::Primary, None, tr!("立即执行")).clicked() {
                 r = Some(true);
             }
-            if button(ui, Btn::Secondary, None, "取消").clicked() {
+            if button(ui, Btn::Secondary, None, tr!("取消")).clicked() {
                 r = Some(false);
             }
         });
@@ -931,5 +936,5 @@ pub fn countdown(ctx: &egui::Context, action: &str, remaining: u64) -> Option<bo
 
 /// 状态标签：计划中的暂停任务显示为“已计划”
 pub fn status_text(s: Status, scheduled: bool) -> &'static str {
-    if s == Status::Paused && scheduled { "已计划" } else { s.label() }
+    if s == Status::Paused && scheduled { tr!("已计划") } else { s.label() }
 }

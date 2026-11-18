@@ -36,17 +36,17 @@
     <b>SwiftDL</b><span id="st"></span>
   </header>
   <div id="pair" hidden style="padding:10px 14px;border-bottom:1px solid #e5e7eb;background:#fff7ed">
-    <div style="margin-bottom:6px">需要配对：在 SwiftDL 设置 → 安全与隐私 中复制配对令牌，粘贴到这里</div>
-    <div style="display:flex;gap:6px"><input id="token" style="flex:1" placeholder="配对令牌" /><button id="savePair">配对</button></div>
+    <div style="margin-bottom:6px" data-i18n="pairHint"></div>
+    <div style="display:flex;gap:6px"><input id="token" style="flex:1" data-i18n-ph="pairPlaceholder" /><button id="savePair" data-i18n="pairButton"></button></div>
   </div>
-  <h4>本页媒体</h4>
+  <h4 data-i18n="pageMedia"></h4>
   <div id="list"></div>
   <details>
-    <summary>设置</summary>
-    <label>接管浏览器下载 <input type="checkbox" id="enabled" /></label>
-    <label>在网页视频上显示下载按钮 <input type="checkbox" id="floatBtn" /></label>
-    <label>接管的最小文件大小 (KB) <input type="number" id="minSizeKB" min="0" /></label>
-    <label>端口 <input type="number" id="port" min="1024" max="65535" /></label>
+    <summary data-i18n="settings"></summary>
+    <label><span data-i18n="optEnabled"></span> <input type="checkbox" id="enabled" /></label>
+    <label><span data-i18n="optFloat"></span> <input type="checkbox" id="floatBtn" /></label>
+    <label><span data-i18n="optMin"></span> <input type="number" id="minSizeKB" min="0" /></label>
+    <label><span data-i18n="optPort"></span> <input type="number" id="port" min="1024" max="65535" /></label>
   </details>
   <script type="module" src="popup.js"></script>
 </body>

@@ -41,7 +41,7 @@ async function send(info) {
     headers: { "Content-Type": "application/json", "X-SwiftDL-Token": token },
     body: JSON.stringify(body),
   });
-  if (r.status === 403) throw new Error("未配对：请在扩展弹窗中填写 SwiftDL 设置里的配对令牌");
+  if (r.status === 403) throw new Error(chrome.i18n.getMessage("unpairedError") || "unpaired");
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
 }
 
@@ -182,7 +182,7 @@ async function hello() {
 }
 
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({ id: "swiftdl-link", title: "使用 SwiftDL 下载", contexts: ["link", "video", "audio", "image"] });
+  chrome.contextMenus.create({ id: "swiftdl-link", title: chrome.i18n.getMessage("menuDownload"), contexts: ["link", "video", "audio", "image"] });
   hello();
 });
 chrome.runtime.onStartup.addListener(hello);

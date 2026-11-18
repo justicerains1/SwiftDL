@@ -35,11 +35,11 @@ impl Status {
     const ALL: [Status; 5] = [Self::Queued, Self::Running, Self::Paused, Self::Done, Self::Error];
     pub fn label(self) -> &'static str {
         match self {
-            Self::Queued => "排队中",
-            Self::Running => "下载中",
-            Self::Paused => "已暂停",
-            Self::Done => "已完成",
-            Self::Error => "出错",
+            Self::Queued => tr!("排队中"),
+            Self::Running => tr!("下载中"),
+            Self::Paused => tr!("已暂停"),
+            Self::Done => tr!("已完成"),
+            Self::Error => tr!("出错"),
         }
     }
 }
@@ -101,6 +101,8 @@ pub struct Settings {
     pub last_update_check: u64,
     /// 用户选择忽略的版本
     pub skip_version: String,
+    /// 界面语言
+    pub lang: crate::i18n::LangSetting,
 }
 
 impl Default for Settings {
@@ -137,6 +139,7 @@ impl Default for Settings {
             auto_update: true,
             last_update_check: 0,
             skip_version: String::new(),
+            lang: crate::i18n::LangSetting::System,
         }
     }
 }
@@ -487,6 +490,9 @@ impl Manager {
         if old.schedule != s.schedule {
             *self.sched_active.lock().unwrap() = None;
         }
+        if old.lang != s.lang {
+            crate::i18n::apply(s.lang);
+        }
         store::save_settings(&s);
         *self.settings.write().unwrap() = s;
         self.schedule();
@@ -609,7 +615,7 @@ impl Manager {
 
     /// 更新失效链接：新链接大小一致才接受，然后继续续传
     pub async fn relink(self: &Arc<Self>, id: u64, url: String) -> Result<(), String> {
-        let t = self.get(id).ok_or("任务不存在")?;
+        let t = self.get(id).ok_or(tr!("任务不存在"))?;
         if t.status() == Status::Running {
             self.pause(id);
             for _ in 0..100 {
@@ -625,11 +631,7 @@ impl Manager {
         {
             let mut m = t.meta.lock().unwrap();
             if m.probed && m.size.is_some() && m.size != info.size {
-                return Err(format!(
-                    "新链接文件大小不一致（原 {} 字节，新 {} 字节）",
-                    m.size.unwrap_or(0),
-                    info.size.map(|s| s.to_string()).unwrap_or_else(|| "未知".into())
-                ));
+                return Err(trf!("新链接文件大小不一致（原 {} 字节，新 {} 字节）", m.size.unwrap_or(0), info.size.map(|s| s.to_string()).unwrap_or_else(|| "未知".into())));
             }
             m.relink = true;
             m.error = None;
@@ -710,7 +712,7 @@ impl Manager {
             let r = sha256_file(&t.final_path());
             let mut m = t.meta.lock().unwrap();
             m.hashing = false;
-            m.hash = Some(r.unwrap_or_else(|e| format!("计算失败：{e}")));
+            m.hash = Some(r.unwrap_or_else(|e| trf!("计算失败：{}", e)));
             drop(m);
             me.mark_dirty();
             me.repaint();

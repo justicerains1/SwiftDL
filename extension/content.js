@@ -11,6 +11,7 @@
     if (!enabled) hide();
   });
 
+  const t = (k) => chrome.i18n.getMessage(k) || k;
   const MIN_W = 200;
   const MIN_H = 120;
   const ICON_DL =
@@ -40,7 +41,7 @@
       .tip { padding: 8px; color: #6b7280; }
       .ok { color: #16a34a; } .err { color: #dc2626; }
     </style>
-    <div class="bar"><div class="btn" title="使用 SwiftDL 下载">${ICON_DL}<span>下载此视频</span></div><div class="x" title="本页不再显示">${ICON_X}</div></div>
+    <div class="bar"><div class="btn" title="${t("floatTitle")}">${ICON_DL}<span>${t("floatButton")}</span></div><div class="x" title="${t("floatClose")}">${ICON_X}</div></div>
     <div class="menu"></div>`;
   const bar = root.querySelector(".bar");
   const btn = root.querySelector(".btn");
@@ -136,7 +137,7 @@
   btn.addEventListener("click", async (e) => {
     e.stopPropagation();
     if (menu.style.display === "block") return (menu.style.display = "none");
-    menu.innerHTML = '<div class="tip">正在查找可下载的视频</div>';
+    menu.innerHTML = `<div class="tip">${t("finding")}</div>`;
     menu.style.display = "block";
     let list = [];
     try {
@@ -147,17 +148,17 @@
       if (it.kind === "hls") {
         if (it.variants && it.variants.length) {
           for (const v of it.variants) opts.push({ tag: "HLS", name: it.name, meta: v.label, url: v.url, file: it.name });
-        } else opts.push({ tag: "HLS", name: it.name, meta: "流媒体", url: it.url, file: it.name });
+        } else opts.push({ tag: "HLS", name: it.name, meta: t("stream"), url: it.url, file: it.name });
       } else if (it.kind === "video" || it.kind === "audio") {
-        opts.push({ tag: it.kind === "audio" ? "音频" : "视频", cls: it.kind, name: it.name, meta: fmtSize(it.size), url: it.url, file: it.name });
+        opts.push({ tag: t(it.kind === "audio" ? "tagAudio" : "tagVideo"), cls: it.kind, name: it.name, meta: fmtSize(it.size), url: it.url, file: it.name });
       }
     }
     const src = current && (current.currentSrc || current.src);
     if (src && /^https?:/i.test(src) && !opts.some((o) => o.url === src)) {
-      opts.unshift({ tag: "视频", name: document.title || "video", meta: "当前播放", url: src, file: `${(document.title || "video").replace(/[<>:"/\\|?*]/g, " ").trim()}.mp4` });
+      opts.unshift({ tag: t("tagVideo"), name: document.title || "video", meta: t("nowPlaying"), url: src, file: `${(document.title || "video").replace(/[<>:"/\\|?*]/g, " ").trim()}.mp4` });
     }
     if (!opts.length) {
-      menu.innerHTML = '<div class="tip">未检测到可下载的视频，请先播放视频。<br>受 DRM 保护的视频无法下载。</div>';
+      menu.innerHTML = `<div class="tip">${t("noneFound")}</div>`;
       return;
     }
     menu.innerHTML = opts
@@ -174,7 +175,7 @@
         try {
           r = await chrome.runtime.sendMessage({ type: "download", url: o.url, name: o.file, referrer: location.href });
         } catch (_) {}
-        menu.innerHTML = r && r.ok ? '<div class="tip ok">已发送到 SwiftDL</div>' : '<div class="tip err">发送失败：请确认 SwiftDL 正在运行</div>';
+        menu.innerHTML = r && r.ok ? `<div class="tip ok">${t("sentOk")}</div>` : `<div class="tip err">${t("sentFail")}</div>`;
         setTimeout(() => (menu.style.display = "none"), 1600);
       }),
     );

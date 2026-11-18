@@ -4,7 +4,9 @@ use crate::engine::store;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const FILES: [(&str, &[u8]); 6] = [
+const FILES: [(&str, &[u8]); 8] = [
+    ("_locales/zh_CN/messages.json", include_bytes!("../extension/_locales/zh_CN/messages.json")),
+    ("_locales/en/messages.json", include_bytes!("../extension/_locales/en/messages.json")),
     ("manifest.json", include_bytes!("../extension/manifest.json")),
     ("background.js", include_bytes!("../extension/background.js")),
     ("sniff.js", include_bytes!("../extension/sniff.js")),
@@ -31,6 +33,9 @@ pub fn extract(token: &str, port: u16) -> std::io::Result<PathBuf> {
     let config = format!("{{\"token\":\"{token}\",\"port\":{port}}}");
     for (name, data) in FILES.iter().copied().chain(std::iter::once(("config.json", config.as_bytes()))) {
         let p = dir.join(name);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         if std::fs::read(&p).ok().as_deref() != Some(data) {
             std::fs::write(&p, data)?;
         }

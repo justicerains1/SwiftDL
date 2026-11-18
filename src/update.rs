@@ -60,20 +60,20 @@ pub async fn check(client: &reqwest::Client, api: &str) -> Result<Option<Release
     match resp.status().as_u16() {
         200 => {}
         404 => return Ok(None), // 尚无正式发布
-        s => return Err(format!("检查更新失败 (HTTP {s})")),
+        s => return Err(trf!("检查更新失败 (HTTP {})", s)),
     }
     let body = resp.bytes().await.map_err(crate::engine::probe::err_str)?;
-    let r: ApiRelease = serde_json::from_slice(&body).map_err(|e| format!("解析发布信息失败：{e}"))?;
+    let r: ApiRelease = serde_json::from_slice(&body).map_err(|e| trf!("解析发布信息失败：{}", e))?;
     if r.draft || r.prerelease || !is_newer(&r.tag_name, env!("CARGO_PKG_VERSION")) {
         return Ok(None);
     }
-    let asset = r.assets.iter().find(|a| a.name.ends_with("-windows-x64.zip")).ok_or("新版本缺少 Windows 安装包")?;
+    let asset = r.assets.iter().find(|a| a.name.ends_with("-windows-x64.zip")).ok_or(tr!("新版本缺少 Windows 安装包"))?;
     let sha256 = asset
         .digest
         .as_deref()
         .and_then(|d| d.strip_prefix("sha256:"))
         .map(str::to_ascii_lowercase)
-        .ok_or("新版本缺少 SHA-256 校验值，为安全起见不自动更新")?;
+        .ok_or(tr!("新版本缺少 SHA-256 校验值，为安全起见不自动更新"))?;
     Ok(Some(Release {
         version: r.tag_name.trim_start_matches('v').to_string(),
         notes: r.body.unwrap_or_default(),
@@ -88,14 +88,14 @@ pub async fn download(client: &reqwest::Client, rel: &Release, work_dir: &Path) 
     use sha2::Digest;
     let resp = client.get(&rel.zip_url).header("user-agent", "SwiftDL-Updater").send().await.map_err(crate::engine::probe::err_str)?;
     if !resp.status().is_success() {
-        return Err(format!("下载更新失败 (HTTP {})", resp.status().as_u16()));
+        return Err(trf!("下载更新失败 (HTTP {})", resp.status().as_u16()));
     }
     let bytes = resp.bytes().await.map_err(crate::engine::probe::err_str)?;
     let got: String = sha2::Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
     if got != rel.sha256 {
-        return Err("更新包校验失败（SHA-256 不一致），已取消更新".into());
+        return Err(tr!("更新包校验失败（SHA-256 不一致），已取消更新").into());
     }
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| format!("更新包损坏：{e}"))?;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| trf!("更新包损坏：{}", e))?;
     let idx = (0..zip.len())
         .find(|&i| {
             zip.by_index(i)
@@ -103,7 +103,7 @@ pub async fn download(client: &reqwest::Client, rel: &Release, work_dir: &Path) 
                 .and_then(|f| f.name().ok().map(|n| n.replace('\\', "/")))
                 .is_some_and(|n| n.rsplit('/').next() == Some("SwiftDL.exe"))
         })
-        .ok_or("更新包中没有 SwiftDL.exe")?;
+        .ok_or(tr!("更新包中没有 SwiftDL.exe"))?;
     std::fs::create_dir_all(work_dir).map_err(|e| e.to_string())?;
     let out = work_dir.join("SwiftDL.new.exe");
     let mut f = std::fs::File::create(&out).map_err(|e| e.to_string())?;
@@ -115,10 +115,10 @@ pub async fn download(client: &reqwest::Client, rel: &Release, work_dir: &Path) 
 pub fn swap(new_exe: &Path, target: &Path) -> Result<(), String> {
     let old = target.with_extension("exe.old");
     let _ = std::fs::remove_file(&old);
-    std::fs::rename(target, &old).map_err(|e| format!("无法替换程序（{e}），请手动下载新版本"))?;
+    std::fs::rename(target, &old).map_err(|e| trf!("无法替换程序（{}），请手动下载新版本", e))?;
     if let Err(e) = std::fs::copy(new_exe, target) {
         let _ = std::fs::rename(&old, target);
-        return Err(format!("写入新程序失败（{e}），已恢复原版本"));
+        return Err(trf!("写入新程序失败（{}），已恢复原版本", e));
     }
     let _ = std::fs::remove_file(new_exe);
     Ok(())
@@ -135,7 +135,7 @@ pub fn cleanup_old() {
 pub fn apply_and_restart(new_exe: &Path) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     swap(new_exe, &exe)?;
-    std::process::Command::new(&exe).arg("--updated").spawn().map_err(|e| format!("新版本启动失败：{e}"))?;
+    std::process::Command::new(&exe).arg("--updated").spawn().map_err(|e| trf!("新版本启动失败：{}", e))?;
     Ok(())
 }
 

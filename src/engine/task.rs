@@ -49,7 +49,7 @@ pub async fn run(m: Arc<Manager>, t: Arc<Task>) {
             }
             Err(e) => {
                 meta.net_error = super::sys::is_network_error(&e);
-                if e.starts_with("磁盘空间不足") {
+                if e.starts_with(tr!("磁盘空间不足")) {
                     meta.retries = u32::MAX; // 本地问题，重试无意义
                 }
                 if e.starts_with("SHA-256") {
@@ -77,10 +77,10 @@ async fn verify_hash(t: &Arc<Task>) -> Result<(), String> {
     let got = tokio::task::spawn_blocking(move || sha256_file(&path))
         .await
         .map_err(|e| e.to_string())?
-        .map_err(|e| format!("SHA-256 计算失败：{e}"))?;
+        .map_err(|e| trf!("SHA-256 计算失败：{}", e))?;
     let ok = got.eq_ignore_ascii_case(&expect);
     t.meta.lock().unwrap().hash = Some(got);
-    if ok { Ok(()) } else { Err("SHA-256 校验失败，文件可能已损坏".into()) }
+    if ok { Ok(()) } else { Err(tr!("SHA-256 校验失败，文件可能已损坏").into()) }
 }
 
 struct Ctx {
@@ -185,14 +185,14 @@ async fn run_inner(m: &Arc<Manager>, t: &Arc<Task>, tok: &CancellationToken) -> 
 
     let part = t.part_path();
     let dir = t.meta.lock().unwrap().dir.clone();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建目录: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| trf!("无法创建目录: {}", e))?;
     let f = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(fresh)
         .open(&part)
-        .map_err(|e| format!("无法打开文件: {e}"))?;
+        .map_err(|e| trf!("无法打开文件: {}", e))?;
     let mut sparse = false;
     // 磁盘空间预检（稀疏文件不会预先占用空间，因此需要主动检查）
     if let Some(sz) = size {
@@ -200,13 +200,13 @@ async fn run_inner(m: &Arc<Manager>, t: &Arc<Task>, tok: &CancellationToken) -> 
         if let Some(free) = super::sys::free_space(&dir)
             && need > free
         {
-            return Err(format!("磁盘空间不足（需要 {}，剩余 {}）", human(need), human(free)));
+            return Err(trf!("磁盘空间不足（需要 {}，剩余 {}）", human(need), human(free)));
         }
     }
     if fresh && let Some(sz) = size {
         // 稀疏文件：多连接在远端偏移写入时，NTFS 无需先同步补零整个空洞
         sparse = sz > 0 && t.segs.lock().unwrap().len() > 1 && set_sparse(&f, true);
-        f.set_len(sz).map_err(|e| format!("磁盘空间不足或无法预分配: {e}"))?;
+        f.set_len(sz).map_err(|e| trf!("磁盘空间不足或无法预分配: {}", e))?;
     }
 
     let wtok = tok.child_token();
@@ -288,7 +288,7 @@ async fn run_inner(m: &Arc<Manager>, t: &Arc<Task>, tok: &CancellationToken) -> 
         })
         .sum();
     if size.is_some() && remaining != 0 {
-        return Err(last_err.unwrap_or_else(|| format!("数据不完整，剩余 {remaining} 字节")));
+        return Err(last_err.unwrap_or_else(|| trf!("数据不完整，剩余 {} 字节", remaining)));
     }
     if size.is_none() {
         let len = t.downloaded.load(Relaxed);
@@ -304,7 +304,7 @@ async fn run_inner(m: &Arc<Manager>, t: &Arc<Task>, tok: &CancellationToken) -> 
         (m.dir.clone(), m.name.clone())
     };
     let final_name = super::unique_name(&name, |n| dir.join(n).exists());
-    std::fs::rename(&part, dir.join(&final_name)).map_err(|e| format!("重命名失败: {e}"))?;
+    std::fs::rename(&part, dir.join(&final_name)).map_err(|e| trf!("重命名失败: {}", e))?;
     t.meta.lock().unwrap().name = final_name;
     t.segs.lock().unwrap().clear();
     Ok(())
@@ -427,7 +427,7 @@ async fn worker(c: &Ctx, seg: &Seg) -> End {
             }
             Ok(()) if after >= seg.st.lock().unwrap().end => return End::Done,
             _ if c.tok.is_cancelled() => return End::Cancelled,
-            Ok(()) => FErr::net("连接提前断开".into()),
+            Ok(()) => FErr::net(tr!("连接提前断开").into()),
             Err(e) => e,
         };
         if err.fatal {
@@ -470,19 +470,19 @@ async fn fetch(c: &Ctx, seg: &Seg) -> Result<(), FErr> {
     };
     let st = resp.status().as_u16();
     if matches!(st, 429 | 503) {
-        return Err(FErr { msg: format!("服务器限流 (HTTP {st})"), throttle: true, fatal: false });
+        return Err(FErr { msg: trf!("服务器限流 (HTTP {})", st), throttle: true, fatal: false });
     }
     if (400..500).contains(&st) && st != 408 {
         let msg = match st {
-            403 => "链接已失效或无权访问 (HTTP 403)，可右键更新下载链接".into(),
-            404 | 410 => format!("文件不存在 (HTTP {st})，可右键更新下载链接"),
+            403 => tr!("链接已失效或无权访问 (HTTP 403)，可右键更新下载链接").into(),
+            404 | 410 => trf!("文件不存在 (HTTP {})，可右键更新下载链接", st),
             _ => format!("HTTP {st}"),
         };
         return Err(FErr { msg, throttle: false, fatal: true });
     }
     if c.resumable {
         if st != 206 {
-            return Err(FErr::net(format!("服务器拒绝分段请求 (HTTP {st})")));
+            return Err(FErr::net(trf!("服务器拒绝分段请求 (HTTP {})", st)));
         }
         let start = resp
             .headers()
@@ -490,7 +490,7 @@ async fn fetch(c: &Ctx, seg: &Seg) -> Result<(), FErr> {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.trim_start_matches("bytes ").split('-').next()?.trim().parse::<u64>().ok());
         if start != Some(pos) {
-            return Err(FErr::net("服务器返回的分段位置不符".into()));
+            return Err(FErr::net(tr!("服务器返回的分段位置不符").into()));
         }
     } else if !(200..300).contains(&st) {
         return Err(FErr::net(format!("HTTP {st}")));
@@ -505,7 +505,7 @@ async fn fetch(c: &Ctx, seg: &Seg) -> Result<(), FErr> {
             _ = c.tok.cancelled() => break Err(CANCELLED.into()),
             r = tokio::time::timeout(stall, resp.chunk()) => match r {
                 Ok(r) => r,
-                Err(_) => break Err("连接停滞，正在重连".into()),
+                Err(_) => break Err(tr!("连接停滞，正在重连").into()),
             },
         };
         let chunk = match chunk {
@@ -567,10 +567,10 @@ async fn flush(c: &Ctx, seg: &Seg, mut buf: Vec<u8>, off: u64) -> Result<Vec<u8>
                 break Ok(());
             }
             match file.seek_write(&buf[done..], off + done as u64) {
-                Ok(0) => break Err("写入 0 字节".to_string()),
+                Ok(0) => break Err(tr!("写入 0 字节").to_string()),
                 Ok(n) => done += n,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => break Err(format!("写入失败: {e}")),
+                Err(e) => break Err(trf!("写入失败: {}", e)),
             }
         };
         (r, buf)

@@ -34,14 +34,14 @@ impl Category {
     /// 自动分类保存时使用的子目录名
     pub fn folder(self) -> &'static str {
         match self {
-            Self::Archive => "压缩文件",
-            Self::Video => "视频",
-            Self::Audio => "音乐",
-            Self::Document => "文档",
-            Self::Program => "程序",
-            Self::DiskImage => "镜像文件",
-            Self::Image => "图片",
-            Self::Other => "其他",
+            Self::Archive => tr!("压缩文件"),
+            Self::Video => tr!("视频"),
+            Self::Audio => tr!("音乐"),
+            Self::Document => tr!("文档"),
+            Self::Program => tr!("程序"),
+            Self::DiskImage => tr!("镜像文件"),
+            Self::Image => tr!("图片"),
+            Self::Other => tr!("其他"),
         }
     }
 }

@@ -1,5 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[macro_use]
+mod i18n;
+mod i18n_en;
+
 mod browser;
 mod clipboard;
 mod engine;
@@ -25,6 +29,7 @@ fn main() {
     update::cleanup_old();
     let urls: Vec<String> = args.into_iter().filter(|a| a.starts_with("http")).collect();
     let settings = engine::store::load_settings();
+    i18n::apply(settings.lang);
     let port = settings.port;
 
     // 单实例：端口被占用且对方是 swiftdl → 转交参数后退出
@@ -115,7 +120,7 @@ fn main() {
         rfd::MessageDialog::new()
             .set_level(rfd::MessageLevel::Error)
             .set_title("SwiftDL")
-            .set_description(format!("界面启动失败：{e}"))
+            .set_description(trf!("界面启动失败：{}", e))
             .show();
     }
 

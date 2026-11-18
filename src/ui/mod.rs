@@ -5,8 +5,9 @@ mod widgets;
 
 pub use theme::app_icon;
 
-use crate::engine::{AddReq, Manager, Status, Task, ThemeMode, UiEvent};
-use dialogs::{AddDialog, DeleteDialog, DialogResult, SettingsDialog};
+use crate::engine::{AddReq, Manager, Move, Status, Task, ThemeMode, UiEvent};
+use crate::tray::{Tray, TrayCmd};
+use dialogs::{AddDialog, CloseAsk, CloseChoice, DeleteDialog, DialogResult, ExtGuide, RelinkDialog, SettingsDialog, status_text};
 use eframe::egui::{
     self, Align, Align2, Frame, Id, Key, Layout, Margin, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2,
 };
@@ -22,6 +23,7 @@ use widgets::*;
 const ROW_H: f32 = 64.0;
 const SAMPLE: Duration = Duration::from_millis(500);
 const HISTORY: usize = 120; // 60 秒
+const COUNTDOWN: u64 = 60;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Filter {
@@ -63,11 +65,80 @@ impl Filter {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sort {
+    Added,
+    Name,
+    Size,
+    Status,
+}
+
+impl Sort {
+    const ALL: [Sort; 4] = [Self::Added, Self::Name, Self::Size, Self::Status];
+    fn label(self) -> &'static str {
+        match self {
+            Self::Added => "队列顺序",
+            Self::Name => "名称",
+            Self::Size => "大小",
+            Self::Status => "状态",
+        }
+    }
+}
+
+/// 全部完成后的动作（仅本次运行有效）
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AfterAll {
+    Nothing,
+    Exit,
+    Sleep,
+    Shutdown,
+}
+
+impl AfterAll {
+    const ALL: [AfterAll; 4] = [Self::Nothing, Self::Exit, Self::Sleep, Self::Shutdown];
+    fn label(self) -> &'static str {
+        match self {
+            Self::Nothing => "不执行操作",
+            Self::Exit => "退出程序",
+            Self::Sleep => "睡眠",
+            Self::Shutdown => "关机",
+        }
+    }
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Nothing => "",
+            Self::Exit => "退出 SwiftDL",
+            Self::Sleep => "进入睡眠",
+            Self::Shutdown => "关闭计算机",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToastKind {
+    Ok,
+    Err,
+}
+
 struct Toast {
-    task: u64,
-    ok: bool,
-    name: String,
+    task: Option<u64>,
+    kind: ToastKind,
+    title: &'static str,
+    text: String,
     born: Instant,
+}
+
+/// 每帧一次的任务快照：侧栏计数、过滤、排序、绘制共用，避免重复加锁
+struct Row {
+    t: Arc<Task>,
+    status: Status,
+    name: String,
+    size: Option<u64>,
+    done: u64,
+    speed: u64,
+    scheduled: bool,
+    finished: u64,
+    error: Option<String>,
 }
 
 pub struct App {
@@ -78,7 +149,12 @@ pub struct App {
     add: Option<AddDialog>,
     settings: Option<SettingsDialog>,
     delete: Option<DeleteDialog>,
+    relink: Option<RelinkDialog>,
+    ext_guide: Option<ExtGuide>,
+    close_ask: Option<CloseAsk>,
     filter: Filter,
+    sort: Sort,
+    sort_desc: bool,
     search: String,
     focus_search: bool,
     history: VecDeque<u64>,
@@ -86,12 +162,21 @@ pub struct App {
     prev: HashMap<u64, Status>,
     toasts: Vec<Toast>,
     theme: Option<ThemeMode>,
+    tray: Option<Tray>,
+    quitting: bool,
+    start_hidden: bool,
+    first_frame: bool,
+    after_all: AfterAll,
+    was_busy: bool,
+    countdown_at: Option<Instant>,
+    ext_was_connected: bool,
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext, m: Arc<Manager>, rx: Receiver<UiEvent>) -> Self {
+    pub fn new(cc: &eframe::CreationContext, m: Arc<Manager>, rx: Receiver<UiEvent>, minimized: bool) -> Self {
         theme::install(&cc.egui_ctx);
         let _ = m.ui_ctx.set(cc.egui_ctx.clone());
+        let tray = crate::tray::create(&cc.egui_ctx);
         Self {
             m,
             rx,
@@ -100,7 +185,12 @@ impl App {
             add: None,
             settings: None,
             delete: None,
+            relink: None,
+            ext_guide: None,
+            close_ask: None,
             filter: Filter::All,
+            sort: Sort::Added,
+            sort_desc: false,
             search: String::new(),
             focus_search: false,
             history: VecDeque::with_capacity(HISTORY + 1),
@@ -108,6 +198,14 @@ impl App {
             prev: HashMap::new(),
             toasts: Vec::new(),
             theme: None,
+            start_hidden: minimized && tray.is_some(),
+            tray,
+            quitting: false,
+            first_frame: true,
+            after_all: AfterAll::Nothing,
+            was_busy: false,
+            countdown_at: None,
+            ext_was_connected: false,
         }
     }
 
@@ -116,7 +214,20 @@ impl App {
             Some(d) => d.append(reqs),
             None => self.add = Some(AddDialog::new(&self.m, reqs)),
         }
-        bring_to_front(ctx);
+        show_window(ctx);
+    }
+
+    fn toast(&mut self, task: Option<u64>, kind: ToastKind, title: &'static str, text: String) {
+        self.toasts.push(Toast { task, kind, title, text, born: Instant::now() });
+        if self.toasts.len() > 4 {
+            self.toasts.remove(0);
+        }
+    }
+
+    fn quit(&mut self, ctx: &egui::Context) {
+        self.quitting = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
     fn selected(&self) -> Vec<u64> {
@@ -127,29 +238,64 @@ impl App {
         self.m.tasks.read().unwrap().iter().map(|t| t.id).collect()
     }
 
-    fn visible_tasks(&self) -> Vec<Arc<Task>> {
-        let q = self.search.trim().to_lowercase();
+    fn snapshot(&self) -> Vec<Row> {
         self.m
             .tasks
             .read()
             .unwrap()
             .iter()
-            .filter(|t| self.filter.matches(t.status()))
-            .filter(|t| q.is_empty() || display_name(t).to_lowercase().contains(&q) || t.req.url.to_lowercase().contains(&q))
-            .cloned()
+            .map(|t| {
+                let m = t.meta.lock().unwrap();
+                let name = if m.name.is_empty() {
+                    crate::engine::probe::url_name(&t.url()).unwrap_or_else(|| t.url())
+                } else {
+                    m.name.clone()
+                };
+                Row {
+                    t: t.clone(),
+                    status: t.status(),
+                    name,
+                    size: m.size,
+                    done: t.downloaded.load(Relaxed),
+                    speed: t.speed.load(Relaxed),
+                    scheduled: m.scheduled,
+                    finished: m.finished,
+                    error: m.error.clone(),
+                }
+            })
             .collect()
     }
 
+    /// 过滤 + 搜索 + 排序
+    fn visible<'a>(&self, rows: &'a [Row]) -> Vec<&'a Row> {
+        let q = self.search.trim().to_lowercase();
+        let mut v: Vec<&Row> = rows
+            .iter()
+            .filter(|r| self.filter.matches(r.status))
+            .filter(|r| q.is_empty() || r.name.to_lowercase().contains(&q) || r.t.url().to_lowercase().contains(&q))
+            .collect();
+        match self.sort {
+            Sort::Added => {}
+            Sort::Name => v.sort_by_cached_key(|r| r.name.to_lowercase()),
+            Sort::Size => v.sort_by_key(|r| r.size.unwrap_or(0)),
+            Sort::Status => v.sort_by_key(|r| r.status as u8),
+        }
+        if self.sort_desc {
+            v.reverse();
+        }
+        v
+    }
+
     /// 每 500ms 采样总速度，供侧栏折线使用
-    fn sample_speed(&mut self) {
+    fn sample_speed(&mut self, rows: &[Row]) {
         let now = Instant::now();
         if now.duration_since(self.last_sample) > Duration::from_secs(60) {
             self.history.clear();
             self.last_sample = now;
         }
+        let total: u64 = rows.iter().map(|r| r.speed).sum();
         while now.duration_since(self.last_sample) >= SAMPLE {
             self.last_sample += SAMPLE;
-            let total: u64 = self.m.tasks.read().unwrap().iter().map(|t| t.speed.load(Relaxed)).sum();
             self.history.push_back(total);
             if self.history.len() > HISTORY {
                 self.history.pop_front();
@@ -158,28 +304,29 @@ impl App {
     }
 
     /// 任务状态变化时弹出提示
-    fn detect_changes(&mut self) {
-        let tasks = self.m.tasks.read().unwrap().clone();
-        for t in &tasks {
-            let s = t.status();
-            if let Some(prev) = self.prev.insert(t.id, s)
-                && prev != s
-                && (s == Status::Done || (s == Status::Error && prev == Status::Running))
+    fn detect_changes(&mut self, rows: &[Row]) {
+        for r in rows {
+            if let Some(prev) = self.prev.insert(r.t.id, r.status)
+                && prev != r.status
             {
-                self.toasts.push(Toast { task: t.id, ok: s == Status::Done, name: display_name(t), born: Instant::now() });
-                if self.toasts.len() > 4 {
-                    self.toasts.remove(0);
+                match r.status {
+                    Status::Done => self.toast(Some(r.t.id), ToastKind::Ok, "下载完成", r.name.clone()),
+                    Status::Error if prev == Status::Running => {
+                        let text = r.error.clone().unwrap_or_else(|| r.name.clone());
+                        self.toast(Some(r.t.id), ToastKind::Err, "下载失败", text)
+                    }
+                    _ => {}
                 }
             }
         }
-        if self.prev.len() > tasks.len() {
-            self.prev.retain(|id, _| tasks.iter().any(|t| t.id == *id));
-            self.sel.retain(|id| tasks.iter().any(|t| t.id == *id));
+        if self.prev.len() > rows.len() {
+            self.prev.retain(|id, _| rows.iter().any(|r| r.t.id == *id));
+            self.sel.retain(|id| rows.iter().any(|r| r.t.id == *id));
         }
     }
 
     // ───────────── 侧边栏 ─────────────
-    fn sidebar(&mut self, ui: &mut Ui) {
+    fn sidebar(&mut self, ui: &mut Ui, rows: &[Row]) {
         let p = theme::pal(ui);
         ui.horizontal(|ui| {
             let (r, _) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::hover());
@@ -190,24 +337,33 @@ impl App {
         ui.add_space(22.0);
         ui.label(RichText::new("分类").size(12.0).color(p.weak));
         ui.add_space(2.0);
-        let counts: Vec<usize> = {
-            let tasks = self.m.tasks.read().unwrap();
-            Filter::ALL.iter().map(|f| tasks.iter().filter(|t| f.matches(t.status())).count()).collect()
-        };
         ui.spacing_mut().item_spacing.y = 2.0;
-        for (f, n) in Filter::ALL.into_iter().zip(counts) {
+        for f in Filter::ALL {
+            let n = rows.iter().filter(|r| f.matches(r.status)).count();
             if nav_item(ui, &p, f.icon(), f.label(), n, self.filter == f).clicked() {
                 self.filter = f;
             }
         }
 
-        // 底部速度卡片
+        // 底部：完成动作 + 速度卡片
         let limit = self.m.settings.read().unwrap().speed_limit_kb;
         let card_h = if limit > 0 { 132.0 } else { 114.0 };
-        let gap = ui.available_height() - card_h;
+        let after_h = 58.0;
+        let gap = ui.available_height() - card_h - after_h;
         if gap > 0.0 {
             ui.add_space(gap);
         }
+        ui.spacing_mut().item_spacing.y = 4.0;
+        ui.label(RichText::new("全部完成后").size(12.0).color(p.weak));
+        egui::ComboBox::from_id_salt("after_all")
+            .width(ui.available_width())
+            .selected_text(self.after_all.label())
+            .show_ui(ui, |ui| {
+                for a in AfterAll::ALL {
+                    ui.selectable_value(&mut self.after_all, a, a.label());
+                }
+            });
+        ui.add_space(8.0);
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), card_h), Sense::hover());
         let painter = ui.painter();
         painter.rect(rect, 10, p.panel, Stroke::new(1.0, p.stroke), StrokeKind::Inside);
@@ -304,41 +460,53 @@ impl App {
     }
 
     // ───────────── 任务列表 ─────────────
-    fn list(&mut self, ui: &mut Ui) {
+    fn list(&mut self, ui: &mut Ui, rows: &[Row]) {
         let p = theme::pal(ui);
-        let tasks = self.visible_tasks();
+        let vis = self.visible(rows);
         ui.horizontal(|ui| {
             ui.label(RichText::new(self.filter.label()).font(bold(17.0)).color(p.text));
-            ui.label(RichText::new(format!("{} 项", tasks.len())).size(13.0).color(p.weak));
-            if self.filter == Filter::Done && !tasks.is_empty() {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if button(ui, Btn::Secondary, Some(Icon::Trash), "清除记录").on_hover_text("仅移除列表记录，不删除文件").clicked() {
-                        let ids: Vec<u64> = tasks.iter().map(|t| t.id).collect();
-                        self.m.remove(&ids, false);
+            ui.label(RichText::new(format!("{} 项", vis.len())).size(13.0).color(p.weak));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let (icon, tip) = if self.sort_desc { (Icon::ArrowDown, "降序") } else { (Icon::ArrowUp, "升序") };
+                if icon_button(ui, icon, tip, true).clicked() {
+                    self.sort_desc = !self.sort_desc;
+                }
+                egui::ComboBox::from_id_salt("sort").width(96.0).selected_text(self.sort.label()).show_ui(ui, |ui| {
+                    for s in Sort::ALL {
+                        ui.selectable_value(&mut self.sort, s, s.label());
                     }
                 });
-            }
+                ui.label(RichText::new("排序").size(13.0).color(p.weak));
+                if self.filter == Filter::Done && !vis.is_empty() {
+                    ui.add_space(8.0);
+                    if button(ui, Btn::Secondary, Some(Icon::Trash), "清除记录").on_hover_text("仅移除列表记录，不删除文件").clicked() {
+                        let ids: Vec<u64> = vis.iter().map(|r| r.t.id).collect();
+                        self.m.remove(&ids, false);
+                    }
+                }
+            });
         });
         ui.add_space(6.0);
-        if tasks.is_empty() {
+        if vis.is_empty() {
             self.empty_state(ui, &p);
             return;
         }
         let mods = ui.input(|i| i.modifiers);
-        egui::ScrollArea::vertical().auto_shrink(false).show_rows(ui, ROW_H, tasks.len(), |ui, range| {
+        egui::ScrollArea::vertical().auto_shrink(false).show_rows(ui, ROW_H, vis.len(), |ui, range| {
             ui.spacing_mut().item_spacing.y = 0.0;
             for i in range {
-                let t = &tasks[i];
+                let r = vis[i];
+                let id = r.t.id;
                 let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
                 if !ui.is_rect_visible(rect) {
                     continue;
                 }
                 let card = Rect::from_min_max(rect.min + vec2(0.0, 3.0), rect.max - vec2(0.0, 3.0));
-                let selected = self.sel.contains(&t.id);
+                let selected = self.sel.contains(&id);
                 let hovered = ui.rect_contains_pointer(card);
-                self.paint_row(ui, &p, card, t, selected, hovered);
+                paint_row(ui, &p, card, r, selected, hovered);
                 if hovered {
-                    self.row_actions(ui, &p, card, t);
+                    self.row_actions(ui, &p, card, r);
                 }
                 if resp.clicked() {
                     if mods.shift
@@ -348,118 +516,39 @@ impl App {
                         if !mods.command {
                             self.sel.clear();
                         }
-                        self.sel.extend(tasks[lo..=hi].iter().map(|t| t.id));
+                        self.sel.extend(vis[lo..=hi.min(vis.len() - 1)].iter().map(|r| r.t.id));
                     } else if mods.command {
-                        if !self.sel.remove(&t.id) {
-                            self.sel.insert(t.id);
+                        if !self.sel.remove(&id) {
+                            self.sel.insert(id);
                         }
                         self.anchor = Some(i);
                     } else {
                         self.sel.clear();
-                        self.sel.insert(t.id);
+                        self.sel.insert(id);
                         self.anchor = Some(i);
                     }
                 }
                 if resp.double_clicked() {
-                    match t.status() {
-                        Status::Done => open_path(&t.final_path(), false),
-                        Status::Running | Status::Queued => self.m.pause(t.id),
-                        _ => self.m.start(t.id),
+                    match r.status {
+                        Status::Done => open_path(&r.t.final_path(), false),
+                        Status::Running | Status::Queued => self.m.pause(id),
+                        _ => self.m.start(id),
                     }
                 }
                 if resp.secondary_clicked() && !selected {
                     self.sel.clear();
-                    self.sel.insert(t.id);
+                    self.sel.insert(id);
                     self.anchor = Some(i);
                 }
-                resp.context_menu(|ui| self.row_menu(ui, t));
+                resp.context_menu(|ui| self.row_menu(ui, r));
             }
         });
     }
 
-    fn paint_row(&self, ui: &Ui, p: &Pal, card: Rect, t: &Task, selected: bool, hovered: bool) {
-        let painter = ui.painter();
-        let (fill, stroke) = if selected {
-            (p.accent_soft, Stroke::new(1.0, p.accent.gamma_multiply(0.7)))
-        } else if hovered {
-            (p.panel, Stroke::new(1.0, p.weak.gamma_multiply(0.45)))
-        } else {
-            (p.panel, Stroke::new(1.0, p.stroke))
-        };
-        painter.rect(card, 10, p.panel, Stroke::NONE, StrokeKind::Inside);
-        painter.rect(card, 10, fill, stroke, StrokeKind::Inside);
-
-        let st = t.status();
-        let name = display_name(t);
-        let size = t.meta.lock().unwrap().size;
-        let done = t.downloaded.load(Relaxed);
-        let speed = t.speed.load(Relaxed);
-        let sc = status_color(p, st);
-
-        let badge = Rect::from_min_size(pos2(card.min.x + 12.0, card.center().y - 19.0), vec2(38.0, 38.0));
-        file_badge(ui, badge, &name);
-        let x0 = badge.max.x + 14.0;
-        let xr = card.max.x - 16.0;
-        let y1 = card.min.y + 20.0;
-        let y2 = card.min.y + 41.0;
-
-        // 第一行：文件名 + 右侧速度/状态
-        let right1 = if st == Status::Running {
-            let txt = if speed > 0 { fmt_speed(speed) } else { "连接中".into() };
-            let g = painter.layout_no_wrap(txt, bold(13.5), p.text);
-            let w = g.size().x;
-            painter.galley(pos2(xr - w, y1 - g.size().y / 2.0), g, p.text);
-            w
-        } else {
-            let g = painter.layout_no_wrap(st.label().into(), prop(13.0), sc);
-            let w = g.size().x;
-            painter.galley(pos2(xr - w, y1 - g.size().y / 2.0), g, sc);
-            icons::paint(painter, Rect::from_center_size(pos2(xr - w - 11.0, y1), vec2(14.0, 14.0)), status_icon(st), sc);
-            w + 20.0
-        };
-        let name_clip = Rect::from_min_max(pos2(x0, card.min.y), pos2(xr - right1 - 16.0, card.max.y));
-        let g = painter.layout_no_wrap(name, prop(14.5), p.text);
-        let gh = g.size().y;
-        painter.with_clip_rect(name_clip).galley(pos2(x0, y1 - gh / 2.0), g, p.text);
-
-        // 第二行：进度条 + 百分比 + 大小 + 右侧剩余时间/完成时间/错误
-        let frac = match (st, size) {
-            (Status::Done, _) => 1.0,
-            (_, Some(s)) if s > 0 => done as f32 / s as f32,
-            _ => 0.0,
-        };
-        let bw = ((xr - x0) * 0.42).clamp(80.0, 340.0);
-        let bar = Rect::from_min_size(pos2(x0, y2 - 2.5), vec2(bw, 5.0));
-        let bar_c = match st {
-            Status::Running => p.accent,
-            Status::Done => p.success,
-            Status::Error => p.danger,
-            _ => p.weak.gamma_multiply(0.7),
-        };
-        progress(ui, bar, frac, bar_c);
-        let info = match (st, size) {
-            (Status::Done, Some(s)) => fmt_size(s),
-            (_, Some(s)) => format!("{:.1}%    {} / {}", frac * 100.0, fmt_size(done), fmt_size(s)),
-            (_, None) if done > 0 => fmt_size(done),
-            _ => String::new(),
-        };
-        painter.text(pos2(bar.max.x + 12.0, y2), Align2::LEFT_CENTER, info, prop(12.5), p.weak);
-        let right2 = match st {
-            Status::Running => size
-                .filter(|_| speed > 0)
-                .map(|s| format!("剩余 {}", fmt_eta(s.saturating_sub(done) / speed)))
-                .unwrap_or_default(),
-            Status::Done => fmt_ago(t.meta.lock().unwrap().finished),
-            Status::Error => t.meta.lock().unwrap().error.clone().map(|e| e.chars().take(28).collect()).unwrap_or_default(),
-            _ => String::new(),
-        };
-        let c2 = if st == Status::Error { p.danger } else { p.weak };
-        painter.text(pos2(xr, y2), Align2::RIGHT_CENTER, right2, prop(12.5), c2);
-    }
-
     /// 悬停时显示的行内操作按钮
-    fn row_actions(&mut self, ui: &mut Ui, p: &Pal, card: Rect, t: &Arc<Task>) {
-        let st = t.status();
+    fn row_actions(&mut self, ui: &mut Ui, p: &Pal, card: Rect, r: &Row) {
+        let st = r.status;
+        let t = &r.t;
         let (main_icon, main_tip) = match st {
             Status::Running | Status::Queued => (Icon::Pause, "暂停"),
             Status::Done => (Icon::External, "打开文件"),
@@ -475,14 +564,14 @@ impl App {
         ui.painter().rect_filled(area, radius, bg);
         let mut x = card.max.x - 12.0 - total;
         for (i, (icon, tip)) in actions.into_iter().enumerate() {
-            let r = Rect::from_min_size(pos2(x, card.center().y - bw / 2.0), vec2(bw, bw));
+            let rr = Rect::from_min_size(pos2(x, card.center().y - bw / 2.0), vec2(bw, bw));
             x += bw + 4.0;
-            let resp = ui.interact(r, Id::unique(("row_act", t.id, i)), Sense::click()).on_hover_text(tip);
+            let resp = ui.interact(rr, Id::unique(("row_act", t.id, i)), Sense::click()).on_hover_text(tip);
             if resp.hovered() {
-                ui.painter().rect_filled(r, 8, p.hover);
+                ui.painter().rect_filled(rr, 8, p.hover);
             }
             let c = if i == 2 && resp.hovered() { p.danger } else { p.text };
-            icons::paint(ui.painter(), Rect::from_center_size(r.center(), vec2(16.0, 16.0)), icon, c);
+            icons::paint(ui.painter(), Rect::from_center_size(rr.center(), vec2(16.0, 16.0)), icon, c);
             if resp.clicked() {
                 match i {
                     0 => match st {
@@ -497,8 +586,9 @@ impl App {
         }
     }
 
-    fn row_menu(&mut self, ui: &mut Ui, t: &Arc<Task>) {
-        let st = t.status();
+    fn row_menu(&mut self, ui: &mut Ui, r: &Row) {
+        let st = r.status;
+        let t = &r.t;
         if st == Status::Done && menu_item(ui, Icon::External, "打开文件", false).clicked() {
             open_path(&t.final_path(), false);
             ui.close();
@@ -516,13 +606,39 @@ impl App {
             self.selected().into_iter().for_each(|id| self.m.pause(id));
             ui.close();
         }
+        if matches!(st, Status::Queued | Status::Paused) {
+            if menu_item(ui, Icon::ArrowUp, "移到队首", false).clicked() {
+                self.m.move_task(t.id, Move::Top);
+                ui.close();
+            }
+            if menu_item(ui, Icon::ArrowUp, "上移", false).clicked() {
+                self.m.move_task(t.id, Move::Up);
+                ui.close();
+            }
+            if menu_item(ui, Icon::ArrowDown, "下移", false).clicked() {
+                self.m.move_task(t.id, Move::Down);
+                ui.close();
+            }
+        }
+        ui.separator();
+        if st != Status::Done && menu_item(ui, Icon::Refresh, "更新下载链接", false).clicked() {
+            self.relink = RelinkDialog::new(&self.m, t.id);
+            ui.close();
+        }
         if st != Status::Running && menu_item(ui, Icon::Refresh, "重新下载", false).clicked() {
             self.m.restart(t.id);
             ui.close();
         }
+        if st == Status::Done && menu_item(ui, Icon::Check, "计算 SHA-256", false).clicked() {
+            self.m.hash_task(t.id);
+            self.sel.clear();
+            self.sel.insert(t.id);
+            ui.close();
+        }
         if menu_item(ui, Icon::Copy, "复制链接", false).clicked() {
-            *self.m.clip_ignore.lock().unwrap() = t.req.url.clone();
-            ui.ctx().copy_text(t.req.url.clone());
+            let url = t.url();
+            *self.m.clip_ignore.lock().unwrap() = url.clone();
+            ui.ctx().copy_text(url);
             ui.close();
         }
         ui.separator();
@@ -558,12 +674,25 @@ impl App {
 
     // ───────────── 详情抽屉 ─────────────
     fn details(&self, ui: &mut Ui, p: &Pal, t: &Arc<Task>) {
-        let (dir, size, err, resumable, probed, created) = {
+        let (name, dir, size, err, resumable, probed, created, scheduled, expect, hash, hashing) = {
             let m = t.meta.lock().unwrap();
-            (m.dir.clone(), m.size, m.error.clone(), m.resumable, m.probed, m.created)
+            (
+                m.name.clone(),
+                m.dir.clone(),
+                m.size,
+                m.error.clone(),
+                m.resumable,
+                m.probed,
+                m.created,
+                m.scheduled,
+                m.sha256.clone(),
+                m.hash.clone(),
+                m.hashing,
+            )
         };
+        let url = t.url();
         let st = t.status();
-        let name = display_name(t);
+        let name = if name.is_empty() { crate::engine::probe::url_name(&url).unwrap_or_else(|| url.clone()) } else { name };
         ui.horizontal(|ui| {
             let (r, _) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
             file_badge(ui, r, &name);
@@ -574,14 +703,19 @@ impl App {
                 ui.add(egui::Label::new(RichText::new(&name).font(bold(15.0)).color(p.text)).truncate());
                 ui.horizontal(|ui| {
                     let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-                    icons::paint(ui.painter(), r, status_icon(st), status_color(p, st));
-                    ui.label(RichText::new(st.label()).size(12.5).color(status_color(p, st)));
+                    let (icon, c) = if st == Status::Paused && scheduled {
+                        (Icon::Clock, p.warning)
+                    } else {
+                        (status_icon(st), status_color(p, st))
+                    };
+                    icons::paint(ui.painter(), r, icon, c);
+                    ui.label(RichText::new(status_text(st, scheduled)).size(12.5).color(c));
                 });
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if icon_button(ui, Icon::Copy, "复制链接", true).clicked() {
-                    *self.m.clip_ignore.lock().unwrap() = t.req.url.clone();
-                    ui.ctx().copy_text(t.req.url.clone());
+                    *self.m.clip_ignore.lock().unwrap() = url.clone();
+                    ui.ctx().copy_text(url.clone());
                 }
                 let folder = if st == Status::Done { t.final_path() } else { t.part_path() };
                 if icon_button(ui, Icon::Folder, "打开所在文件夹", true).clicked() {
@@ -605,13 +739,45 @@ impl App {
             c[0].spacing_mut().item_spacing.y = 4.0;
             c[1].spacing_mut().item_spacing.y = 4.0;
             kv(&mut c[0], "保存位置", dir.display().to_string());
-            kv(&mut c[0], "下载链接", t.req.url.clone());
+            kv(&mut c[0], "下载链接", url.clone());
             kv(&mut c[0], "添加时间", fmt_ago(created));
             let total = size.map(fmt_size).unwrap_or_else(|| "未知".into());
             kv(&mut c[1], "进度", format!("{} / {}", fmt_size(t.downloaded.load(Relaxed)), total));
-            kv(&mut c[1], "连接数", format!("{} / {}", t.active_conns.load(Relaxed), t.conns));
+            let lim = t.conn_limit.load(Relaxed);
+            let conns = if lim < t.conns && st == Status::Running {
+                format!("{} / {}（服务器限流，已降至 {lim}）", t.active_conns.load(Relaxed), t.conns)
+            } else {
+                format!("{} / {}", t.active_conns.load(Relaxed), t.conns)
+            };
+            kv(&mut c[1], "连接数", conns);
             kv(&mut c[1], "断点续传", if !probed { "未知" } else if resumable { "支持" } else { "不支持" }.into());
         });
+        if st == Status::Done || expect.is_some() {
+            ui.horizontal(|ui| {
+                ui.add_sized([64.0, 22.0], egui::Label::new(RichText::new("SHA-256").size(12.5).color(p.weak)));
+                if hashing {
+                    ui.add(egui::Spinner::new().size(13.0));
+                    ui.label(RichText::new("正在计算").size(13.0).color(p.weak));
+                } else if let Some(h) = &hash {
+                    let matched = expect.as_ref().map(|e| e.eq_ignore_ascii_case(h));
+                    let c = match matched {
+                        Some(true) => p.success,
+                        Some(false) => p.danger,
+                        None => p.text,
+                    };
+                    ui.add(egui::Label::new(RichText::new(h).monospace().size(12.0).color(c)).truncate());
+                    if icon_button(ui, Icon::Copy, "复制", true).clicked() {
+                        ui.ctx().copy_text(h.clone());
+                    }
+                } else if st == Status::Done {
+                    if button(ui, Btn::Secondary, Some(Icon::Check), "计算").clicked() {
+                        self.m.hash_task(t.id);
+                    }
+                } else if let Some(e) = &expect {
+                    ui.label(RichText::new(format!("完成后校验：{e}")).size(12.5).color(p.weak));
+                }
+            });
+        }
         if let Some(e) = err {
             ui.add_space(4.0);
             Frame::new().fill(p.danger.gamma_multiply(0.12)).corner_radius(8).inner_margin(Margin::symmetric(10, 6)).show(ui, |ui| {
@@ -653,20 +819,22 @@ impl App {
                             ui.set_width(300.0);
                             ui.horizontal(|ui| {
                                 let (r, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
-                                let (icon, c, title) =
-                                    if t.ok { (Icon::Check, p.success, "下载完成") } else { (Icon::Alert, p.danger, "下载失败") };
+                                let (icon, c) = match t.kind {
+                                    ToastKind::Ok => (Icon::Check, p.success),
+                                    ToastKind::Err => (Icon::Alert, p.danger),
+                                };
                                 icons::paint(ui.painter(), r, icon, c);
                                 ui.vertical(|ui| {
                                     ui.spacing_mut().item_spacing.y = 1.0;
-                                    ui.label(RichText::new(title).font(bold(14.0)).color(p.text));
-                                    ui.add(egui::Label::new(RichText::new(&t.name).size(12.5).color(p.weak)).truncate());
+                                    ui.label(RichText::new(t.title).font(bold(14.0)).color(p.text));
+                                    ui.add(egui::Label::new(RichText::new(&t.text).size(12.5).color(p.weak)).truncate());
                                 });
                             });
                         })
                 })
                 .response;
-            if t.ok && resp.interact(Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                open = Some(t.task);
+            if t.kind == ToastKind::Ok && resp.interact(Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                open = t.task;
             }
             y -= resp.rect.height() + 10.0;
         }
@@ -674,13 +842,13 @@ impl App {
             && let Some(t) = self.m.get(id)
         {
             open_path(&t.final_path(), false);
-            self.toasts.retain(|x| x.task != id);
+            self.toasts.retain(|x| x.task != Some(id));
         }
         ctx.request_repaint_after(Duration::from_millis(33));
     }
 
-    fn shortcuts(&mut self, ctx: &egui::Context) {
-        if self.add.is_some() || self.settings.is_some() || self.delete.is_some() {
+    fn shortcuts(&mut self, ctx: &egui::Context, rows: &[Row]) {
+        if self.add.is_some() || self.settings.is_some() || self.delete.is_some() || self.relink.is_some() || self.ext_guide.is_some() {
             return;
         }
         let typing = ctx.memory(|m| m.focused().is_some());
@@ -711,7 +879,7 @@ impl App {
             self.delete = Some(DeleteDialog::new(self.selected()));
         }
         if all {
-            self.sel = self.visible_tasks().iter().map(|t| t.id).collect();
+            self.sel = self.visible(rows).iter().map(|r| r.t.id).collect();
         }
         if space {
             for id in self.selected() {
@@ -733,9 +901,88 @@ impl App {
             }
         }
     }
+
+    /// 全部完成后的动作
+    fn run_after_all(&mut self, ctx: &egui::Context) {
+        use std::os::windows::process::CommandExt;
+        let action = std::mem::replace(&mut self.after_all, AfterAll::Nothing);
+        self.countdown_at = None;
+        match action {
+            AfterAll::Nothing => {}
+            AfterAll::Exit => self.quit(ctx),
+            AfterAll::Sleep => {
+                self.m.save();
+                unsafe { windows_sys::Win32::System::Power::SetSuspendState(false, false, false) };
+            }
+            AfterAll::Shutdown => {
+                self.m.save();
+                let _ = std::process::Command::new("shutdown").args(["/s", "/t", "0"]).creation_flags(0x0800_0000).spawn();
+                self.quit(ctx);
+            }
+        }
+    }
 }
 
 impl eframe::App for App {
+    /// 每帧（包括窗口隐藏在托盘时）都会调用：处理托盘、关闭、完成动作
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.first_frame {
+            self.first_frame = false;
+            if self.start_hidden {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            } else if !self.m.settings.read().unwrap().ext_guide_done && !crate::browser::connected() {
+                self.ext_guide = Some(ExtGuide::new());
+            }
+        }
+        // 扩展连接：首次连接后不再自动弹出安装向导
+        if crate::browser::connected() && !self.ext_was_connected {
+            self.ext_was_connected = true;
+            let mut s = self.m.settings.read().unwrap().clone();
+            if !s.ext_guide_done {
+                s.ext_guide_done = true;
+                self.m.apply_settings(s);
+                self.toast(None, ToastKind::Ok, "浏览器扩展已连接", "浏览器中的下载将自动交给 SwiftDL".into());
+            }
+        }
+        let cmds: Vec<TrayCmd> = self.tray.as_ref().map(|t| t.rx.try_iter().collect()).unwrap_or_default();
+        for c in cmds {
+            match c {
+                TrayCmd::Show => show_window(ctx),
+                TrayCmd::StartAll => self.all_ids().into_iter().for_each(|id| self.m.start(id)),
+                TrayCmd::PauseAll => self.all_ids().into_iter().for_each(|id| self.m.pause(id)),
+                TrayCmd::Quit => self.quit(ctx),
+            }
+        }
+        // 关闭按钮：最小化到托盘（首次询问）
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quitting && self.tray.is_some() {
+            let s = self.m.settings.read().unwrap().clone();
+            if !s.tray_hint_shown {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.close_ask = Some(CloseAsk::new());
+            } else if s.close_to_tray {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+        }
+        // 全部完成后的动作：从“有任务在跑”变为“全部空闲”时开始倒计时
+        let busy = self.m.tasks.read().unwrap().iter().any(|t| matches!(t.status(), Status::Running | Status::Queued));
+        if self.after_all != AfterAll::Nothing && self.was_busy && !busy && self.countdown_at.is_none() {
+            self.countdown_at = Some(Instant::now());
+            show_window(ctx);
+        }
+        if busy {
+            self.countdown_at = None;
+        }
+        self.was_busy = busy;
+        if let Some(t0) = self.countdown_at {
+            if t0.elapsed().as_secs() >= COUNTDOWN {
+                self.run_after_all(ctx);
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(250));
+            }
+        }
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let mode = self.m.settings.read().unwrap().theme;
@@ -746,19 +993,20 @@ impl eframe::App for App {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
                 UiEvent::Add(r) => self.open_add(&ctx, r),
-                UiEvent::Show => bring_to_front(&ctx),
+                UiEvent::Show => show_window(&ctx),
             }
         }
-        self.shortcuts(&ctx);
-        self.sample_speed();
-        self.detect_changes();
+        let rows = self.snapshot();
+        self.shortcuts(&ctx, &rows);
+        self.sample_speed(&rows);
+        self.detect_changes(&rows);
         let p = theme::pal(ui);
 
         egui::Panel::left("sidebar")
             .resizable(false)
             .exact_size(212.0)
             .frame(Frame::new().fill(p.side).inner_margin(Margin { left: 14, right: 14, top: 16, bottom: 14 }))
-            .show(ui, |ui| self.sidebar(ui));
+            .show(ui, |ui| self.sidebar(ui, &rows));
         egui::Panel::top("topbar")
             .frame(Frame::new().fill(p.panel).inner_margin(Margin::symmetric(16, 10)))
             .show(ui, |ui| self.topbar(ui));
@@ -771,17 +1019,22 @@ impl eframe::App for App {
         }
         egui::CentralPanel::no_frame()
             .frame(Frame::new().fill(p.bg).inner_margin(Margin { left: 18, right: 18, top: 14, bottom: 6 }))
-            .show(ui, |ui| self.list(ui));
+            .show(ui, |ui| self.list(ui, &rows));
 
         if let Some(d) = &mut self.add
             && matches!(d.show(&ctx, &self.m), DialogResult::Close)
         {
             self.add = None;
         }
-        if let Some(d) = &mut self.settings
-            && matches!(d.show(&ctx, &self.m), DialogResult::Close)
-        {
-            self.settings = None;
+        if let Some(d) = &mut self.settings {
+            match d.show(&ctx, &self.m) {
+                DialogResult::Close => self.settings = None,
+                DialogResult::OpenExtGuide => {
+                    self.settings = None;
+                    self.ext_guide = Some(ExtGuide::new());
+                }
+                DialogResult::None => {}
+            }
         }
         if let Some(d) = &mut self.delete
             && matches!(d.show(&ctx, &self.m), DialogResult::Close)
@@ -791,13 +1044,140 @@ impl eframe::App for App {
             }
             self.delete = None;
         }
+        if let Some(d) = &mut self.relink
+            && matches!(d.show(&ctx, &self.m), DialogResult::Close)
+        {
+            self.relink = None;
+        }
+        if let Some(d) = &mut self.ext_guide
+            && matches!(d.show(&ctx, &self.m), DialogResult::Close)
+        {
+            self.ext_guide = None;
+        }
+        if let Some(d) = &mut self.close_ask {
+            let choice = d.show(&ctx);
+            let remember_as = |tray: bool| {
+                let mut s = self.m.settings.read().unwrap().clone();
+                s.close_to_tray = tray;
+                s.tray_hint_shown = true;
+                self.m.apply_settings(s);
+            };
+            match choice {
+                CloseChoice::None => {}
+                CloseChoice::Cancel => self.close_ask = None,
+                CloseChoice::Tray { remember } => {
+                    if remember {
+                        remember_as(true);
+                    }
+                    self.close_ask = None;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                }
+                CloseChoice::Quit { remember } => {
+                    if remember {
+                        remember_as(false);
+                    }
+                    self.close_ask = None;
+                    self.quit(&ctx);
+                }
+            }
+        }
+        if let Some(t0) = self.countdown_at {
+            let left = COUNTDOWN.saturating_sub(t0.elapsed().as_secs());
+            match dialogs::countdown(&ctx, self.after_all.verb(), left) {
+                Some(true) => self.run_after_all(&ctx),
+                Some(false) => {
+                    self.countdown_at = None;
+                    self.after_all = AfterAll::Nothing;
+                }
+                None => {}
+            }
+        }
         self.toasts(&ctx);
 
         // 仅在有任务活动时定时刷新，空闲时零 CPU
-        if self.m.tasks.read().unwrap().iter().any(|t| t.status() == Status::Running) {
+        if rows.iter().any(|r| r.status == Status::Running) {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
     }
+}
+
+fn paint_row(ui: &Ui, p: &Pal, card: Rect, r: &Row, selected: bool, hovered: bool) {
+    let painter = ui.painter();
+    let (fill, stroke) = if selected {
+        (p.accent_soft, Stroke::new(1.0, p.accent.gamma_multiply(0.7)))
+    } else if hovered {
+        (p.panel, Stroke::new(1.0, p.weak.gamma_multiply(0.45)))
+    } else {
+        (p.panel, Stroke::new(1.0, p.stroke))
+    };
+    painter.rect(card, 10, p.panel, Stroke::NONE, StrokeKind::Inside);
+    painter.rect(card, 10, fill, stroke, StrokeKind::Inside);
+
+    let st = r.status;
+    let (size, done, speed) = (r.size, r.done, r.speed);
+    let planned = st == Status::Paused && r.scheduled;
+    let sc = if planned { p.warning } else { status_color(p, st) };
+
+    let badge = Rect::from_min_size(pos2(card.min.x + 12.0, card.center().y - 19.0), vec2(38.0, 38.0));
+    file_badge(ui, badge, &r.name);
+    let x0 = badge.max.x + 14.0;
+    let xr = card.max.x - 16.0;
+    let y1 = card.min.y + 20.0;
+    let y2 = card.min.y + 41.0;
+
+    // 第一行：文件名 + 右侧速度/状态
+    let right1 = if st == Status::Running {
+        let txt = if speed > 0 { fmt_speed(speed) } else { "连接中".into() };
+        let g = painter.layout_no_wrap(txt, bold(13.5), p.text);
+        let w = g.size().x;
+        painter.galley(pos2(xr - w, y1 - g.size().y / 2.0), g, p.text);
+        w
+    } else {
+        let g = painter.layout_no_wrap(status_text(st, r.scheduled).into(), prop(13.0), sc);
+        let w = g.size().x;
+        painter.galley(pos2(xr - w, y1 - g.size().y / 2.0), g, sc);
+        let icon = if planned { Icon::Clock } else { status_icon(st) };
+        icons::paint(painter, Rect::from_center_size(pos2(xr - w - 11.0, y1), vec2(14.0, 14.0)), icon, sc);
+        w + 20.0
+    };
+    let name_clip = Rect::from_min_max(pos2(x0, card.min.y), pos2(xr - right1 - 16.0, card.max.y));
+    let g = painter.layout_no_wrap(r.name.clone(), prop(14.5), p.text);
+    let gh = g.size().y;
+    painter.with_clip_rect(name_clip).galley(pos2(x0, y1 - gh / 2.0), g, p.text);
+
+    // 第二行：进度条 + 百分比 + 大小 + 右侧剩余时间/完成时间/错误
+    let frac = match (st, size) {
+        (Status::Done, _) => 1.0,
+        (_, Some(s)) if s > 0 => done as f32 / s as f32,
+        _ => 0.0,
+    };
+    let bw = ((xr - x0) * 0.42).clamp(80.0, 340.0);
+    let bar = Rect::from_min_size(pos2(x0, y2 - 2.5), vec2(bw, 5.0));
+    let bar_c = match st {
+        Status::Running => p.accent,
+        Status::Done => p.success,
+        Status::Error => p.danger,
+        _ => p.weak.gamma_multiply(0.7),
+    };
+    progress(ui, bar, frac, bar_c);
+    let info = match (st, size) {
+        (Status::Done, Some(s)) => fmt_size(s),
+        (_, Some(s)) => format!("{:.1}%    {} / {}", frac * 100.0, fmt_size(done), fmt_size(s)),
+        (_, None) if done > 0 => fmt_size(done),
+        _ => String::new(),
+    };
+    painter.text(pos2(bar.max.x + 12.0, y2), Align2::LEFT_CENTER, info, prop(12.5), p.weak);
+    let right2 = match st {
+        Status::Running => size
+            .filter(|_| speed > 0)
+            .map(|s| format!("剩余 {}", fmt_eta(s.saturating_sub(done) / speed)))
+            .unwrap_or_default(),
+        Status::Done => fmt_ago(r.finished),
+        Status::Error => r.error.clone().map(|e| e.chars().take(28).collect()).unwrap_or_default(),
+        _ => String::new(),
+    };
+    let c2 = if st == Status::Error { p.danger } else { p.weak };
+    painter.text(pos2(xr, y2), Align2::RIGHT_CENTER, right2, prop(12.5), c2);
 }
 
 fn nav_item(ui: &mut Ui, p: &Pal, icon: Icon, label: &str, count: usize, selected: bool) -> egui::Response {
@@ -827,18 +1207,9 @@ fn separator_v(ui: &mut Ui, p: &Pal) {
     ui.painter().rect_filled(r, 0, p.stroke);
 }
 
-fn display_name(t: &Task) -> String {
-    let m = t.meta.lock().unwrap();
-    if m.name.is_empty() {
-        crate::engine::probe::url_name(&t.req.url).unwrap_or_else(|| t.req.url.clone())
-    } else {
-        m.name.clone()
-    }
-}
-
-fn bring_to_front(ctx: &egui::Context) {
-    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+fn show_window(ctx: &egui::Context) {
     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
 }
 
@@ -862,7 +1233,19 @@ mod tests {
     fn ui_strings_only_safe_glyphs() {
         let ok = |c: char| c.is_ascii() || ('\u{4E00}'..='\u{9FFF}').contains(&c) || "，。：（）、！？；“”《》".contains(c);
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let files = ["ui/mod.rs", "ui/dialogs.rs", "ui/widgets.rs", "ui/theme.rs", "ui/icons.rs", "engine/mod.rs", "engine/task.rs", "engine/probe.rs"];
+        let files = [
+            "ui/mod.rs",
+            "ui/dialogs.rs",
+            "ui/widgets.rs",
+            "ui/theme.rs",
+            "ui/icons.rs",
+            "engine/mod.rs",
+            "engine/task.rs",
+            "engine/probe.rs",
+            "engine/kind.rs",
+            "tray.rs",
+            "browser.rs",
+        ];
         let mut bad = vec![];
         for f in files {
             let src = std::fs::read_to_string(root.join(f)).unwrap();

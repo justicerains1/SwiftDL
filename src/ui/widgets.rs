@@ -135,23 +135,19 @@ pub fn menu_item(ui: &mut Ui, icon: Icon, text: &str, danger: bool) -> Response 
     resp
 }
 
-/// 根据扩展名返回（缩写, 颜色）
+/// 根据文件类型返回徽标（缩写, 颜色），分类与“按类型保存”共用 engine::kind
 pub fn file_kind(name: &str) -> (&'static str, Color32) {
-    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
-    match ext.as_str() {
-        "zip" | "rar" | "7z" | "gz" | "xz" | "bz2" | "tar" | "zst" | "tgz" => ("ZIP", Color32::from_rgb(0xF5, 0x9E, 0x0B)),
-        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" | "m4v" | "ts" => ("MP4", Color32::from_rgb(0x8B, 0x5C, 0xF6)),
-        "mp3" | "flac" | "wav" | "m4a" | "aac" | "ogg" | "opus" => ("MP3", Color32::from_rgb(0xEC, 0x48, 0x99)),
-        "pdf" => ("PDF", Color32::from_rgb(0xEF, 0x44, 0x44)),
-        "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "md" | "epub" | "csv" => {
-            ("DOC", Color32::from_rgb(0x3B, 0x82, 0xF6))
-        }
-        "exe" | "msi" | "msix" | "apk" | "dmg" | "deb" | "rpm" | "appimage" | "bat" => {
-            ("EXE", Color32::from_rgb(0x10, 0xB9, 0x81))
-        }
-        "iso" | "img" | "bin" | "vhd" | "vhdx" => ("ISO", Color32::from_rgb(0x64, 0x74, 0x8B)),
-        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "svg" | "heic" => ("IMG", Color32::from_rgb(0x06, 0xB6, 0xD4)),
-        _ => ("FILE", Color32::from_rgb(0x94, 0xA3, 0xB8)),
+    use crate::engine::kind::{Category, category, ext_of};
+    match category(name) {
+        Category::Archive => ("ZIP", Color32::from_rgb(0xF5, 0x9E, 0x0B)),
+        Category::Video => ("MP4", Color32::from_rgb(0x8B, 0x5C, 0xF6)),
+        Category::Audio => ("MP3", Color32::from_rgb(0xEC, 0x48, 0x99)),
+        Category::Document if ext_of(name) == "pdf" => ("PDF", Color32::from_rgb(0xEF, 0x44, 0x44)),
+        Category::Document => ("DOC", Color32::from_rgb(0x3B, 0x82, 0xF6)),
+        Category::Program => ("EXE", Color32::from_rgb(0x10, 0xB9, 0x81)),
+        Category::DiskImage => ("ISO", Color32::from_rgb(0x64, 0x74, 0x8B)),
+        Category::Image => ("IMG", Color32::from_rgb(0x06, 0xB6, 0xD4)),
+        Category::Other => ("FILE", Color32::from_rgb(0x94, 0xA3, 0xB8)),
     }
 }
 

@@ -22,12 +22,13 @@ pub enum Icon {
     PauseCircle,
     X,
     ArrowDown,
+    ArrowUp,
     Refresh,
     Inbox,
 }
 
 #[cfg(test)]
-pub const ALL: [Icon; 19] = [
+pub const ALL: [Icon; 20] = [
     Icon::Plus,
     Icon::Play,
     Icon::Pause,
@@ -45,6 +46,7 @@ pub const ALL: [Icon; 19] = [
     Icon::PauseCircle,
     Icon::X,
     Icon::ArrowDown,
+    Icon::ArrowUp,
     Icon::Refresh,
     Icon::Inbox,
 ];
@@ -178,6 +180,10 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::ArrowDown => {
             pen.line(&[(8.0, 2.5), (8.0, 13.0)]);
             pen.line(&[(3.8, 8.8), (8.0, 13.0), (12.2, 8.8)]);
+        }
+        Icon::ArrowUp => {
+            pen.line(&[(8.0, 13.5), (8.0, 3.0)]);
+            pen.line(&[(3.8, 7.2), (8.0, 3.0), (12.2, 7.2)]);
         }
         Icon::Refresh => {
             // 缺口在右侧的圆弧，箭头位于终点（右上）

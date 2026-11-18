@@ -1,5 +1,9 @@
-// SwiftDL 浏览器接管：拦截下载 → 发给本地 SwiftDL；程序未运行时放行浏览器原生下载。
-const DEFAULTS = { enabled: true, minSizeKB: 0, port: 52080 };
+// SwiftDL 浏览器扩展后台：
+// 1. 接管浏览器下载 → 发给本地 SwiftDL；程序未运行时放行浏览器原生下载
+// 2. 嗅探网页加载的视频/音频/m3u8，按标签页记录，图标显示数量
+import { classify, mergeItem, normalizeKey, parseMaster, suggestName, totalSize } from "./sniff.js";
+
+const DEFAULTS = { enabled: true, minSizeKB: 0, port: 52080, floatBtn: true };
 const cfg = () => chrome.storage.local.get(DEFAULTS);
 
 async function send(info) {
@@ -24,6 +28,7 @@ async function send(info) {
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
 }
 
+// ───────────── 下载接管 ─────────────
 chrome.downloads.onCreated.addListener(async (item) => {
   const { enabled, minSizeKB } = await cfg();
   const url = item.finalUrl || item.url;
@@ -44,6 +49,109 @@ chrome.downloads.onCreated.addListener(async (item) => {
   }
 });
 
+// ───────────── 媒体嗅探 ─────────────
+const keyOf = (tabId) => `tab:${tabId}`;
+
+async function getList(tabId) {
+  const k = keyOf(tabId);
+  return (await chrome.storage.session.get(k))[k] || [];
+}
+
+async function setList(tabId, list) {
+  await chrome.storage.session.set({ [keyOf(tabId)]: list });
+  try {
+    await chrome.action.setBadgeText({ tabId, text: list.length ? String(list.length) : "" });
+    await chrome.action.setBadgeBackgroundColor({ tabId, color: "#2F6FED" });
+  } catch (_) {}
+}
+
+// 同一标签页的更新串行执行，避免并发覆盖
+const queues = new Map();
+function serial(tabId, fn) {
+  const next = (queues.get(tabId) || Promise.resolve()).then(fn, fn);
+  queues.set(
+    tabId,
+    next.catch(() => {}),
+  );
+  return next;
+}
+
+async function fetchVariants(url) {
+  try {
+    const r = await fetch(url, { credentials: "include" });
+    if (!r.ok) return null;
+    return parseMaster(await r.text(), url);
+  } catch (_) {
+    return null;
+  }
+}
+
+function record(tabId, item) {
+  return serial(tabId, async () => {
+    let tab;
+    try {
+      tab = await chrome.tabs.get(tabId);
+    } catch (_) {
+      return;
+    }
+    const list = await getList(tabId);
+    if (list.some((x) => x.url === item.url) && item.kind !== "hls") {
+      await setList(tabId, mergeItem(list, item));
+      return;
+    }
+    if (item.kind === "hls" && !list.some((x) => x.url === item.url)) item.variants = await fetchVariants(item.url);
+    item.title = tab.title || "";
+    item.referrer = tab.url || "";
+    item.name = suggestName(tab.title, item.url, item.kind);
+    item.time = Date.now();
+    await setList(tabId, mergeItem(list, item));
+  });
+}
+
+chrome.webRequest.onHeadersReceived.addListener(
+  (d) => {
+    if (d.tabId < 0 || d.statusCode >= 400) return;
+    const h = {};
+    for (const x of d.responseHeaders || []) h[x.name.toLowerCase()] = x.value || "";
+    const kind = classify(d.url, h["content-type"], totalSize(h));
+    if (!kind) return;
+    record(d.tabId, {
+      url: normalizeKey(d.url),
+      kind,
+      mime: (h["content-type"] || "").split(";")[0],
+      size: kind === "hls" ? -1 : totalSize(h),
+    });
+  },
+  { urls: ["<all_urls>"], types: ["media", "xmlhttprequest", "other", "object"] },
+  ["responseHeaders"],
+);
+
+// 页面跳转或关闭时清空该页记录
+chrome.tabs.onUpdated.addListener((tabId, info) => {
+  if (info.status === "loading" && info.url) serial(tabId, () => setList(tabId, []));
+});
+chrome.tabs.onRemoved.addListener((tabId) => {
+  chrome.storage.session.remove(keyOf(tabId));
+  queues.delete(tabId);
+});
+
+// ───────────── 消息：弹窗与网页浮动按钮 ─────────────
+chrome.runtime.onMessage.addListener((msg, sender, reply) => {
+  if (msg.type === "list") {
+    const tabId = msg.tabId ?? sender.tab?.id;
+    getList(tabId).then(reply, () => reply([]));
+    return true;
+  }
+  if (msg.type === "download") {
+    send({ url: msg.url, filename: msg.name, referrer: msg.referrer })
+      .then(() => reply({ ok: true }))
+      .catch((e) => reply({ ok: false, error: String(e) }));
+    return true;
+  }
+  return false;
+});
+
+// ───────────── 连接握手与右键菜单 ─────────────
 // 向 SwiftDL 报到，程序据此确认扩展已安装并连接
 async function hello() {
   const { port } = await cfg();
@@ -60,5 +168,5 @@ chrome.runtime.onStartup.addListener(hello);
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   const url = info.linkUrl || info.srcUrl;
-  if (url) send({ url, referrer: tab && tab.url }).catch(() => {});
+  if (url && /^https?:/i.test(url)) send({ url, referrer: tab && tab.url }).catch(() => {});
 });

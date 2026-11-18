@@ -4,9 +4,11 @@ use crate::engine::store;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const FILES: [(&str, &[u8]); 4] = [
+const FILES: [(&str, &[u8]); 6] = [
     ("manifest.json", include_bytes!("../extension/manifest.json")),
     ("background.js", include_bytes!("../extension/background.js")),
+    ("sniff.js", include_bytes!("../extension/sniff.js")),
+    ("content.js", include_bytes!("../extension/content.js")),
     ("popup.html", include_bytes!("../extension/popup.html")),
     ("popup.js", include_bytes!("../extension/popup.js")),
 ];

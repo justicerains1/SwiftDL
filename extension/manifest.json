@@ -1,10 +1,18 @@
 {
   "manifest_version": 3,
   "name": "SwiftDL 下载接管",
-  "version": "0.2.0",
-  "description": "把浏览器下载交给 SwiftDL 多线程加速",
-  "permissions": ["downloads", "cookies", "storage", "contextMenus"],
+  "version": "0.3.0",
+  "description": "接管浏览器下载、嗅探网页视频音频（含 m3u8），交给 SwiftDL 多线程加速",
+  "permissions": ["downloads", "cookies", "storage", "contextMenus", "webRequest", "tabs"],
   "host_permissions": ["<all_urls>"],
-  "background": { "service_worker": "background.js" },
-  "action": { "default_popup": "popup.html", "default_title": "SwiftDL" }
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_popup": "popup.html", "default_title": "SwiftDL" },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ]
 }

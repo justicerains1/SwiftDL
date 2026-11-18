@@ -34,6 +34,7 @@
 . ./env.sh                     # 设置 RUSTUP_HOME / CARGO_HOME / PATH（含 MinGW），路径按本机修改
 cargo build --release          # 产物：target/release/swiftdl.exe
 cargo test --release -- --test-threads=1
+python -I packaging/package.py # 打包：dist/SwiftDL-v<版本>-windows-x64.zip
 ```
 
 ## 安装浏览器扩展

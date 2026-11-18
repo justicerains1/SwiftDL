@@ -18,6 +18,8 @@ pub enum DialogResult {
     Close,
     /// 从设置中打开扩展安装向导
     OpenExtGuide,
+    /// 立即检查更新
+    CheckUpdate,
 }
 
 fn modal(ctx: &egui::Context, id: &str, width: f32, add: impl FnOnce(&mut Ui, &Pal)) -> bool {
@@ -574,6 +576,17 @@ impl SettingsDialog {
                         }
                     });
                     hint(ui, p, "浏览器扩展需携带令牌才能投递任务，防止网页或同机其他用户冒用");
+                });
+                section(ui, p, "更新", |ui| {
+                    row(ui, p, "当前版本", |ui| {
+                        ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).color(p.text));
+                        if button(ui, Btn::Secondary, Some(Icon::Refresh), "检查更新").clicked() {
+                            result = DialogResult::CheckUpdate;
+                        }
+                    });
+                    row(ui, p, "自动检查", |ui| {
+                        ui.checkbox(&mut s.auto_update, "每天检查一次新版本（下载后校验 SHA-256 再替换）");
+                    });
                 });
                 section(ui, p, "存储与缓存", |ui| {
                     row(ui, p, "自动清理记录", |ui| {

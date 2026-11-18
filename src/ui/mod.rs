@@ -120,6 +120,16 @@ enum ToastKind {
     Err,
 }
 
+/// 更新下载状态
+#[derive(Clone, Default)]
+enum UpdateJob {
+    #[default]
+    Idle,
+    Downloading,
+    Ready(std::path::PathBuf),
+    Failed(String),
+}
+
 struct Toast {
     task: Option<u64>,
     kind: ToastKind,
@@ -170,6 +180,11 @@ pub struct App {
     drop_over: Option<Arc<std::sync::atomic::AtomicBool>>,
     hidden: bool,
     tray_tip: (String, Instant),
+    /// 自动更新：检查结果、下载状态
+    update: Option<crate::update::Release>,
+    update_slot: Arc<std::sync::Mutex<Option<Result<Option<crate::update::Release>, String>>>>,
+    update_job: Arc<std::sync::Mutex<UpdateJob>>,
+    update_checked_at: Instant,
     quitting: bool,
     start_hidden: bool,
     first_frame: bool,
@@ -221,6 +236,10 @@ impl App {
             drop_over,
             hidden: false,
             tray_tip: (String::new(), Instant::now()),
+            update: None,
+            update_slot: Arc::default(),
+            update_job: Arc::default(),
+            update_checked_at: Instant::now() - Duration::from_secs(3600),
         }
     }
 
@@ -494,6 +513,7 @@ impl App {
     fn list(&mut self, ui: &mut Ui, rows: &[Row]) {
         let p = theme::pal(ui);
         let vis = self.visible(rows);
+        self.update_banner(ui, &p);
         ui.horizontal(|ui| {
             ui.label(RichText::new(self.filter.label()).font(bold(17.0)).color(p.text));
             ui.label(RichText::new(format!("{} 项", vis.len())).size(13.0).color(p.weak));
@@ -899,6 +919,103 @@ impl App {
         ctx.request_repaint_after(Duration::from_millis(33));
     }
 
+    /// 自动更新：每天检查一次（或手动立即检查），收取结果，下载完成后替换并重启
+    fn poll_update(&mut self, ctx: &egui::Context, force: bool) {
+        let (auto, last) = {
+            let s = self.m.settings.read().unwrap();
+            (s.auto_update, s.last_update_check)
+        };
+        let due = auto && crate::engine::now().saturating_sub(last) >= 86400 && self.update_checked_at.elapsed() >= Duration::from_secs(600);
+        if force || due {
+            self.update_checked_at = Instant::now();
+            let mut s = self.m.settings.read().unwrap().clone();
+            s.last_update_check = crate::engine::now();
+            self.m.apply_settings(s);
+            let (slot, client, m) = (self.update_slot.clone(), self.m.client(), self.m.clone());
+            self.m.rt.spawn(async move {
+                let r = crate::update::check(&client, crate::update::API).await;
+                *slot.lock().unwrap() = Some(r);
+                m.repaint();
+            });
+        }
+        let result = self.update_slot.lock().unwrap().take();
+        if let Some(r) = result {
+            match r {
+                Ok(Some(rel)) => self.update = Some(rel),
+                Ok(None) if force => self.toast(None, ToastKind::Ok, "已是最新版本", format!("当前版本 v{}", env!("CARGO_PKG_VERSION"))),
+                Err(e) if force => self.toast(None, ToastKind::Err, "检查更新失败", e),
+                _ => {}
+            }
+        }
+        let job = self.update_job.lock().unwrap().clone();
+        if let UpdateJob::Ready(exe) = job {
+            match crate::update::apply_and_restart(&exe) {
+                Ok(()) => self.quit(ctx),
+                Err(e) => *self.update_job.lock().unwrap() = UpdateJob::Failed(e),
+            }
+        }
+    }
+
+    fn start_update(&mut self) {
+        let Some(rel) = self.update.clone() else { return };
+        *self.update_job.lock().unwrap() = UpdateJob::Downloading;
+        let (job, client, m) = (self.update_job.clone(), self.m.client(), self.m.clone());
+        self.m.rt.spawn(async move {
+            let dir = crate::engine::store::data_dir().join("update");
+            let r = crate::update::download(&client, &rel, &dir).await;
+            *job.lock().unwrap() = match r {
+                Ok(p) => UpdateJob::Ready(p),
+                Err(e) => UpdateJob::Failed(e),
+            };
+            m.repaint();
+        });
+    }
+
+    fn update_banner(&mut self, ui: &mut Ui, p: &Pal) {
+        let Some(rel) = self.update.clone() else { return };
+        if self.m.settings.read().unwrap().skip_version == rel.version {
+            return;
+        }
+        let job = self.update_job.lock().unwrap().clone();
+        Frame::new()
+            .fill(p.accent_soft)
+            .stroke(Stroke::new(1.0, p.accent.gamma_multiply(0.5)))
+            .corner_radius(10)
+            .inner_margin(Margin::symmetric(14, 10))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
+                    icons::paint(ui.painter(), r, Icon::Download, p.accent);
+                    ui.label(RichText::new(format!("发现新版本 v{}", rel.version)).font(bold(14.0)).color(p.text));
+                    ui.label(RichText::new(format!("当前 v{}", env!("CARGO_PKG_VERSION"))).size(12.5).color(p.weak));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| match &job {
+                        UpdateJob::Downloading | UpdateJob::Ready(_) => {
+                            ui.label(RichText::new("正在下载并校验更新").size(12.5).color(p.weak));
+                            ui.add(egui::Spinner::new().size(14.0));
+                        }
+                        _ => {
+                            if button(ui, Btn::Primary, Some(Icon::Download), "立即更新").clicked() {
+                                self.start_update();
+                            }
+                            if button(ui, Btn::Secondary, None, "查看更新内容").clicked() {
+                                let _ = std::process::Command::new("explorer").arg(&rel.page).spawn();
+                            }
+                            if button(ui, Btn::Secondary, None, "忽略此版本").clicked() {
+                                let mut s = self.m.settings.read().unwrap().clone();
+                                s.skip_version = rel.version.clone();
+                                self.m.apply_settings(s);
+                            }
+                        }
+                    });
+                });
+                if let UpdateJob::Failed(e) = &job {
+                    ui.label(RichText::new(e).size(12.5).color(p.danger));
+                }
+            });
+        ui.add_space(8.0);
+    }
+
     /// 任务栏进度条与托盘提示
     fn update_system(&mut self, rows: &[Row]) {
         let running: Vec<&Row> = rows.iter().filter(|r| r.status == Status::Running).collect();
@@ -1040,6 +1157,7 @@ impl eframe::App for App {
         let rows = self.snapshot();
         self.detect_changes(ctx, &rows);
         self.update_system(&rows);
+        self.poll_update(ctx, false);
         if self.first_frame {
             self.first_frame = false;
             if self.start_hidden {
@@ -1146,6 +1264,7 @@ impl eframe::App for App {
                     self.settings = None;
                     self.ext_guide = Some(ExtGuide::new());
                 }
+                DialogResult::CheckUpdate => self.poll_update(&ctx, true),
                 DialogResult::None => {}
             }
         }

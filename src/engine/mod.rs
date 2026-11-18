@@ -96,6 +96,11 @@ pub struct Settings {
     pub motw: bool,
     /// 本地接口配对令牌（扩展与第二实例需携带）
     pub token: String,
+    /// 每天自动检查更新
+    pub auto_update: bool,
+    pub last_update_check: u64,
+    /// 用户选择忽略的版本
+    pub skip_version: String,
 }
 
 impl Default for Settings {
@@ -129,6 +134,9 @@ impl Default for Settings {
             recycle: true,
             motw: true,
             token: String::new(),
+            auto_update: true,
+            last_update_check: 0,
+            skip_version: String::new(),
         }
     }
 }
@@ -364,6 +372,8 @@ pub struct Manager {
     next_id: AtomicU64,
     dirty: AtomicBool,
     last_saved: Mutex<Vec<u8>>,
+    /// SQLite 任务库；打不开时为 None，回退到 JSON 文件
+    db: Mutex<Option<store::Db>>,
     sched_active: Mutex<Option<bool>>,
     pub rt: tokio::runtime::Handle,
     pub ui_ctx: OnceLock<eframe::egui::Context>,
@@ -420,7 +430,12 @@ impl Manager {
             settings.token = sys::random_token();
             store::save_settings(&settings);
         }
-        let tasks: Vec<Arc<Task>> = store::load_tasks().into_iter().map(Task::from_rec).collect();
+        let mut db = store::Db::open();
+        let recs = match &mut db {
+            Some(db) => db.load(),
+            None => store::load_tasks(),
+        };
+        let tasks: Vec<Arc<Task>> = recs.into_iter().map(Task::from_rec).collect();
         let next = tasks.iter().map(|t| t.id).max().unwrap_or(0) + 1;
         Arc::new(Self {
             tasks: RwLock::new(tasks),
@@ -430,6 +445,7 @@ impl Manager {
             next_id: AtomicU64::new(next),
             dirty: AtomicBool::new(false),
             last_saved: Mutex::new(Vec::new()),
+            db: Mutex::new(db),
             sched_active: Mutex::new(None),
             rt,
             ui_ctx: OnceLock::new(),
@@ -798,17 +814,21 @@ impl Manager {
         any
     }
 
-    /// 持久化：内容未变化时跳过写盘
-    pub fn save(&self) {
+    /// 持久化：只写入有变化的任务行，返回写入行数（JSON 回退模式下为 0 或 1）
+    pub fn save(&self) -> usize {
         let recs: Vec<_> = self.tasks.read().unwrap().iter().map(|t| t.to_rec()).collect();
         self.dirty.store(false, Release);
+        if let Some(db) = self.db.lock().unwrap().as_mut() {
+            return db.save(&recs);
+        }
         let bytes = store::encode(&recs);
         let mut last = self.last_saved.lock().unwrap();
         if *last == bytes {
-            return;
+            return 0;
         }
         store::write_bytes("tasks.json", &bytes);
         *last = bytes;
+        1
     }
 
     pub fn save_if_needed(&self, running: bool) {

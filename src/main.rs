@@ -5,6 +5,7 @@ mod clipboard;
 mod engine;
 mod server;
 mod tray;
+mod update;
 mod ui;
 mod winsys;
 
@@ -20,12 +21,26 @@ fn main() {
         .expect("tokio runtime");
     let args: Vec<String> = std::env::args().skip(1).collect();
     let minimized = args.iter().any(|a| a == "--minimized");
+    let updated = args.iter().any(|a| a == "--updated");
+    update::cleanup_old();
     let urls: Vec<String> = args.into_iter().filter(|a| a.starts_with("http")).collect();
     let settings = engine::store::load_settings();
     let port = settings.port;
 
     // 单实例：端口被占用且对方是 swiftdl → 转交参数后退出
-    let listener = match rt.block_on(tokio::net::TcpListener::bind(("127.0.0.1", port))) {
+    // 刚完成自动更新：旧进程可能还没退出，稍等它释放端口
+    let bind = || rt.block_on(tokio::net::TcpListener::bind(("127.0.0.1", port)));
+    let mut first = bind();
+    if updated {
+        for _ in 0..40 {
+            if first.is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+            first = bind();
+        }
+    }
+    let listener = match first {
         Ok(l) => Some(l),
         Err(_) => {
             if rt.block_on(server::forward(port, &settings.token, &urls)) {

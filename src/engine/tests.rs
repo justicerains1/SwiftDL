@@ -392,17 +392,13 @@ fn end_to_end() {
     std::thread::sleep(Duration::from_millis(300));
     assert!(!part.exists());
 
-    // 9. 内容未变化时不重复写盘
+    // 9. 只写入有变化的任务行（SQLite）
     m.save();
-    let tasks_json = store::data_dir().join("tasks.json");
-    std::fs::remove_file(&tasks_json).unwrap();
-    m.save();
-    assert!(!tasks_json.exists(), "内容未变化不应写盘");
-    m.mark_dirty();
+    assert_eq!(m.save(), 0, "内容未变化不应写入");
     let second = m.tasks.read().unwrap()[1].id;
     m.move_task(second, Move::Top);
-    m.save();
-    assert!(tasks_json.exists(), "内容变化后应写盘");
+    assert_eq!(m.save(), 2, "调整顺序只应更新两行的位置");
+    assert!(store::data_dir().join("swiftdl.db").exists());
 }
 
 #[test]
@@ -729,4 +725,55 @@ fn reliability() {
     assert_ne!(t.status(), Status::Error, "网络恢复后应重新排队");
     wait(&t, Status::Error, 30);
     assert_eq!(t.meta.lock().unwrap().retries, 0, "网络错误不消耗自动重试次数");
+}
+
+#[test]
+fn sqlite_migration() {
+    let root = std::env::temp_dir().join(format!("swiftdl-test-migrate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    unsafe { std::env::set_var("APPDATA", root.join("appdata")) };
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    // 构造旧版 tasks.json（含已完成与暂停任务）
+    let mk = |id: u64, name: &str, status: Status| store::TaskRec {
+        id,
+        req: AddReq { url: format!("https://a.com/{name}"), ..Default::default() },
+        name: name.into(),
+        dir: root.clone(),
+        conns: 8,
+        size: Some(1000),
+        resumable: true,
+        validator: None,
+        probed: true,
+        status,
+        error: None,
+        created: 1,
+        finished: 2,
+        downloaded: 1000,
+        segs: vec![],
+        auto_dir: false,
+        scheduled: false,
+        sha256: None,
+        hash: None,
+        retries: 0,
+        hls: None,
+    };
+    let old = vec![mk(5, "a.zip", Status::Done), mk(9, "b.iso", Status::Paused), mk(7, "c.mp4", Status::Done)];
+    store::write_bytes("tasks.json", &store::encode(&old));
+
+    let m = Manager::new(rt.handle().clone(), Settings { dir: root.clone(), ..Default::default() });
+    let names: Vec<String> = m.tasks.read().unwrap().iter().map(|t| t.meta.lock().unwrap().name.clone()).collect();
+    assert_eq!(names, ["a.zip", "b.iso", "c.mp4"], "迁移后应保持顺序");
+    assert!(!store::data_dir().join("tasks.json").exists());
+    assert!(store::data_dir().join("tasks.json.bak").exists(), "旧文件应备份");
+    assert_eq!(m.save(), 0, "迁移后立即保存不应有改动");
+    drop(m);
+
+    // 重新打开：从数据库读取，内容一致；删除只写一行
+    let m2 = Manager::new(rt.handle().clone(), Settings { dir: root.clone(), ..Default::default() });
+    assert_eq!(m2.tasks.read().unwrap().len(), 3);
+    m2.remove(&[9], false);
+    assert_eq!(m2.save(), 2, "删除中间的任务：删除一行 + 其后任务位置更新一行");
+    drop(m2);
+    assert_eq!(store::load_tasks().len(), 2);
+    let _ = std::fs::remove_dir_all(&root);
 }

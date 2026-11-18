@@ -38,12 +38,20 @@ pub async fn run(m: Arc<Manager>, t: Arc<Task>) {
         match r {
             Ok(()) => {
                 meta.error = None;
+                meta.net_error = false;
                 meta.finished = now();
                 meta.retries = 0;
                 t.set_status(Status::Done);
             }
-            Err(_) if tok.is_cancelled() => t.set_status(Status::Paused),
+            Err(_) if tok.is_cancelled() => {
+                // 睡眠唤醒触发的取消：重新排队而不是暂停
+                t.set_status(if t.requeue.swap(false, AcqRel) { Status::Queued } else { Status::Paused });
+            }
             Err(e) => {
+                meta.net_error = super::sys::is_network_error(&e);
+                if e.starts_with("磁盘空间不足") {
+                    meta.retries = u32::MAX; // 本地问题，重试无意义
+                }
                 if e.starts_with("SHA-256") {
                     meta.retries = u32::MAX; // 校验失败不自动重试
                 }
@@ -52,6 +60,10 @@ pub async fn run(m: Arc<Manager>, t: Arc<Task>) {
                 t.set_status(Status::Error);
             }
         }
+    }
+    if t.status() == Status::Done && m.settings.read().unwrap().motw {
+        let req = t.req();
+        super::sys::mark_from_web(&t.final_path(), &req.url, req.referrer.as_deref());
     }
     m.save();
     m.schedule();
@@ -182,6 +194,15 @@ async fn run_inner(m: &Arc<Manager>, t: &Arc<Task>, tok: &CancellationToken) -> 
         .open(&part)
         .map_err(|e| format!("无法打开文件: {e}"))?;
     let mut sparse = false;
+    // 磁盘空间预检（稀疏文件不会预先占用空间，因此需要主动检查）
+    if let Some(sz) = size {
+        let need = sz.saturating_sub(t.downloaded.load(Relaxed));
+        if let Some(free) = super::sys::free_space(&dir)
+            && need > free
+        {
+            return Err(format!("磁盘空间不足（需要 {}，剩余 {}）", human(need), human(free)));
+        }
+    }
     if fresh && let Some(sz) = size {
         // 稀疏文件：多连接在远端偏移写入时，NTFS 无需先同步补零整个空洞
         sparse = sz > 0 && t.segs.lock().unwrap().len() > 1 && set_sparse(&f, true);
@@ -287,6 +308,11 @@ async fn run_inner(m: &Arc<Manager>, t: &Arc<Task>, tok: &CancellationToken) -> 
     t.meta.lock().unwrap().name = final_name;
     t.segs.lock().unwrap().clear();
     Ok(())
+}
+
+fn human(b: u64) -> String {
+    let gb = b as f64 / 1073741824.0;
+    if gb >= 1.0 { format!("{gb:.1} GB") } else { format!("{:.1} MB", b as f64 / 1048576.0) }
 }
 
 /// 设置/取消 NTFS 稀疏属性；不支持的文件系统返回 false

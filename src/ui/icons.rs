@@ -208,10 +208,11 @@ mod tests {
         let ctx = egui::Context::default();
         for (i, icon) in ALL.iter().enumerate() {
             let rect = Rect::from_min_size(pos2(100.0, 100.0), vec2(16.0, 16.0));
-            let out = ctx.run_ui(Default::default(), |ui| {
+            let mut out = ctx.run_ui(Default::default(), |ui| {
                 let painter = ui.ctx().layer_painter(LayerId::new(Order::Foreground, Id::unique(("icon", i))));
                 paint(&painter, rect, *icon, Color32::WHITE);
             });
+            out.textures_delta.clear(); // 测试中不上传纹理，显式丢弃
             let shapes: Vec<_> = out.shapes.iter().filter(|s| s.shape.visual_bounding_rect().is_positive()).collect();
             assert!(!shapes.is_empty(), "{icon:?} 没有绘制任何图形");
             for s in shapes {

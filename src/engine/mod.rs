@@ -5,6 +5,7 @@ pub mod limiter;
 pub mod probe;
 pub mod sched;
 pub mod store;
+pub mod sys;
 pub mod task;
 #[cfg(test)]
 mod tests;
@@ -89,6 +90,12 @@ pub struct Settings {
     pub ffmpeg: String,
     /// HLS（TS）下载完成后用 ffmpeg 转为 MP4
     pub hls_mp4: bool,
+    /// 删除文件时移到回收站
+    pub recycle: bool,
+    /// 下载完成后写入“来自 Internet”标记
+    pub motw: bool,
+    /// 本地接口配对令牌（扩展与第二实例需携带）
+    pub token: String,
 }
 
 impl Default for Settings {
@@ -119,6 +126,9 @@ impl Default for Settings {
             ext_guide_done: false,
             ffmpeg: String::new(),
             hls_mp4: true,
+            recycle: true,
+            motw: true,
+            token: String::new(),
         }
     }
 }
@@ -173,6 +183,8 @@ pub struct Meta {
     pub relink: bool,
     /// HLS 流媒体任务的进度
     pub hls: Option<hls::HlsState>,
+    /// 最近一次错误属于网络类（网络恢复后自动重试，不消耗重试次数）
+    pub net_error: bool,
 }
 
 pub struct Task {
@@ -193,6 +205,8 @@ pub struct Task {
     /// HLS 分片总数 / 已完成数（界面显示用）
     pub seg_total: AtomicU32,
     pub seg_done: AtomicU32,
+    /// 取消后重新排队而不是暂停（睡眠唤醒时重建连接用）
+    pub requeue: AtomicBool,
     pub cancel: Mutex<CancellationToken>,
 }
 
@@ -294,6 +308,7 @@ impl Task {
                 error_at: now(),
                 relink: false,
                 hls: r.hls,
+                net_error: false,
             }),
             status: AtomicU8::new(r.status as u8),
             downloaded: AtomicU64::new(downloaded),
@@ -305,6 +320,7 @@ impl Task {
             throttled_at: AtomicU64::new(0),
             seg_total: AtomicU32::new(seg_total),
             seg_done: AtomicU32::new(seg_done),
+            requeue: AtomicBool::new(false),
             cancel: Mutex::new(CancellationToken::new()),
         })
     }
@@ -400,6 +416,10 @@ impl Manager {
     pub fn new(rt: tokio::runtime::Handle, mut settings: Settings) -> Arc<Self> {
         settings.max_active = settings.max_active.clamp(1, 10);
         settings.conns = settings.conns.clamp(1, 32);
+        if settings.token.len() < 16 {
+            settings.token = sys::random_token();
+            store::save_settings(&settings);
+        }
         let tasks: Vec<Arc<Task>> = store::load_tasks().into_iter().map(Task::from_rec).collect();
         let next = tasks.iter().map(|t| t.id).max().unwrap_or(0) + 1;
         Arc::new(Self {
@@ -554,6 +574,7 @@ impl Manager {
         self.mark_dirty();
         self.schedule();
         // 等待下载线程释放文件句柄后再删除
+        let recycle = self.settings.read().unwrap().recycle;
         self.rt.spawn(async move {
             for t in removed {
                 for _ in 0..100 {
@@ -564,7 +585,7 @@ impl Manager {
                 }
                 let _ = std::fs::remove_file(t.part_path());
                 if delete_file && t.status() == Status::Done {
-                    let _ = std::fs::remove_file(t.final_path());
+                    sys::delete_file(&t.final_path(), recycle);
                 }
             }
         });
@@ -604,6 +625,36 @@ impl Manager {
         self.mark_dirty();
         self.repaint();
         Ok(())
+    }
+
+    /// 网络恢复：立即重试所有因网络中断而出错的任务
+    pub fn on_network_restored(self: &Arc<Self>) -> usize {
+        let mut n = 0;
+        for t in self.tasks.read().unwrap().iter() {
+            if t.status() == Status::Error && t.meta.lock().unwrap().net_error {
+                t.set_status(Status::Queued);
+                n += 1;
+            }
+        }
+        if n > 0 {
+            self.mark_dirty();
+            self.schedule();
+            self.repaint();
+        }
+        n
+    }
+
+    /// 系统从睡眠唤醒：旧连接多半已失效，重建正在下载的任务并重试网络错误
+    pub fn on_wake(self: &Arc<Self>) -> usize {
+        let mut n = 0;
+        for t in self.tasks.read().unwrap().iter() {
+            if t.status() == Status::Running {
+                t.requeue.store(true, Release);
+                t.cancel.lock().unwrap().cancel();
+                n += 1;
+            }
+        }
+        n + self.on_network_restored()
     }
 
     /// 调整队列顺序（调度按列表顺序拉起任务）
@@ -705,8 +756,16 @@ impl Manager {
                 }
                 Status::Error if auto_retry > 0 => {
                     let mut m = t.meta.lock().unwrap();
-                    if m.retries < auto_retry && ts.saturating_sub(m.error_at) >= RETRY_DELAY {
-                        m.retries += 1;
+                    // 网络类错误不消耗重试次数，每分钟再试一次（网络恢复时会立即重试）
+                    let due = if m.net_error {
+                        ts.saturating_sub(m.error_at) >= RETRY_DELAY * 2
+                    } else {
+                        m.retries < auto_retry && ts.saturating_sub(m.error_at) >= RETRY_DELAY
+                    };
+                    if due {
+                        if !m.net_error {
+                            m.retries += 1;
+                        }
                         t.set_status(Status::Queued);
                         requeue = true;
                     }

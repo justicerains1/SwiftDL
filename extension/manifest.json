@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SwiftDL 下载接管",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "接管浏览器下载、嗅探网页视频音频（含 m3u8），交给 SwiftDL 多线程加速",
   "permissions": ["downloads", "cookies", "storage", "contextMenus", "webRequest", "tabs"],
   "host_permissions": ["<all_urls>"],

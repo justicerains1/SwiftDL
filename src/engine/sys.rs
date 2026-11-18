@@ -1,0 +1,196 @@
+//! Windows 系统能力：磁盘空间、回收站、下载来源标记（MOTW）、安全随机数、网络连通性通知、错误分类。
+use std::os::windows::ffi::OsStrExt;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+
+fn wide(p: &Path) -> Vec<u16> {
+    p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+}
+
+/// 测试用：非 0 时代替真实可用空间
+#[cfg(test)]
+pub static FAKE_FREE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 目录所在磁盘的可用空间（字节）
+pub fn free_space(dir: &Path) -> Option<u64> {
+    #[cfg(test)]
+    {
+        let f = FAKE_FREE.load(Ordering::Relaxed);
+        if f > 0 {
+            return Some(f);
+        }
+    }
+    // 目录可能尚未创建：向上找到存在的祖先目录
+    let mut d = dir;
+    while !d.exists() {
+        d = d.parent()?;
+    }
+    let w = wide(d);
+    let mut free = 0u64;
+    let ok = unsafe {
+        windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(w.as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut())
+    };
+    (ok != 0).then_some(free)
+}
+
+/// 移到回收站；失败（如路径过长、网络盘）时返回 false
+pub fn recycle(path: &Path) -> bool {
+    use windows_sys::Win32::UI::Shell::*;
+    if !path.exists() {
+        return true;
+    }
+    // pFrom 需以两个 NUL 结尾
+    let mut from = wide(path);
+    from.push(0);
+    let mut op = SHFILEOPSTRUCTW {
+        hwnd: std::ptr::null_mut(),
+        wFunc: FO_DELETE,
+        pFrom: from.as_ptr(),
+        pTo: std::ptr::null(),
+        fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI) as u16,
+        fAnyOperationsAborted: 0,
+        hNameMappings: std::ptr::null_mut(),
+        lpszProgressTitle: std::ptr::null(),
+    };
+    unsafe { SHFileOperationW(&mut op) == 0 && op.fAnyOperationsAborted == 0 && !path.exists() }
+}
+
+/// 删除文件：优先移到回收站，不行再直接删除
+pub fn delete_file(path: &Path, to_recycle: bool) {
+    if !(to_recycle && recycle(path)) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// 去掉 URL 中的账号密码，避免写入文件属性或显示
+pub fn strip_credentials(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(mut u) => {
+            let _ = u.set_username("");
+            let _ = u.set_password(None);
+            u.to_string()
+        }
+        Err(_) => url.to_string(),
+    }
+}
+
+/// 写入“来自 Internet”标记（Zone.Identifier 备用数据流），让 SmartScreen / Office 受保护视图生效
+pub fn mark_from_web(path: &Path, host_url: &str, referrer: Option<&str>) -> bool {
+    let mut s = String::from("[ZoneTransfer]\r\nZoneId=3\r\n");
+    if let Some(r) = referrer.filter(|r| r.starts_with("http")) {
+        s.push_str(&format!("ReferrerUrl={}\r\n", strip_credentials(r)));
+    }
+    if host_url.contains("://") {
+        s.push_str(&format!("HostUrl={}\r\n", strip_credentials(host_url)));
+    }
+    let mut ads = path.as_os_str().to_owned();
+    ads.push(":Zone.Identifier");
+    std::fs::write(ads, s).is_ok()
+}
+
+#[cfg(test)]
+pub fn read_mark(path: &Path) -> Option<String> {
+    let mut ads = path.as_os_str().to_owned();
+    ads.push(":Zone.Identifier");
+    std::fs::read_to_string(ads).ok()
+}
+
+/// 系统安全随机数生成的令牌（32 位十六进制）
+pub fn random_token() -> String {
+    use windows_sys::Win32::Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom};
+    let mut b = [0u8; 16];
+    let st = unsafe { BCryptGenRandom(std::ptr::null_mut(), b.as_mut_ptr(), b.len() as u32, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+    if st != 0 {
+        // 极少见：退化为时间与地址混合
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        b = (t ^ (&b as *const _ as u128)).to_le_bytes();
+    }
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+// ───────────── 网络连通性 ─────────────
+
+/// 网络从“不可用”变为“可访问”时置位，由后台节拍消费
+pub static NET_RESTORED: AtomicBool = AtomicBool::new(false);
+static NET_LEVEL: AtomicI32 = AtomicI32::new(-1);
+
+unsafe extern "system" fn on_hint(_ctx: *const core::ffi::c_void, hint: windows_sys::Win32::Networking::WinSock::NL_NETWORK_CONNECTIVITY_HINT) {
+    use windows_sys::Win32::Networking::WinSock::*;
+    let lvl = hint.ConnectivityLevel;
+    let up = |l: i32| l == NetworkConnectivityLevelHintInternetAccess || l == NetworkConnectivityLevelHintConstrainedInternetAccess || l == NetworkConnectivityLevelHintLocalAccess;
+    let prev = NET_LEVEL.swap(lvl, Ordering::Relaxed);
+    if up(lvl) && prev != -1 && !up(prev) {
+        NET_RESTORED.store(true, Ordering::Relaxed);
+    }
+}
+
+/// 注册系统网络连通性变化通知（Windows 10 2004+）
+pub fn watch_network() {
+    let mut h: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
+    unsafe {
+        windows_sys::Win32::NetworkManagement::IpHelper::NotifyNetworkConnectivityHintChange(Some(on_hint), std::ptr::null(), true, &mut h);
+    }
+}
+
+/// 后台节拍间隔远大于预期时，说明系统刚从睡眠/休眠中唤醒
+pub fn woke_from_sleep(gap_secs: u64) -> bool {
+    gap_secs >= 20
+}
+
+/// 错误分类：网络类错误在网络恢复后自动重试，且不消耗自动重试次数
+pub fn is_network_error(e: &str) -> bool {
+    let l = e.to_ascii_lowercase();
+    [
+        "error sending request",
+        "connection",
+        "connect",
+        "timed out",
+        "dns",
+        "network",
+        "os error 10051",
+        "os error 10060",
+        "os error 10065",
+        "os error 11001",
+        "unexpected eof",
+        "error decoding response body",
+        "连接停滞",
+        "连接提前断开",
+    ]
+    .iter()
+    .any(|k| l.contains(k))
+        && !l.contains("http 4")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helpers() {
+        let tmp = std::env::temp_dir().join(format!("swiftdl-sys-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        assert!(free_space(&tmp.join("not/yet/created")).unwrap() > 0);
+
+        let f = tmp.join("a.bin");
+        std::fs::write(&f, b"hello").unwrap();
+        assert!(mark_from_web(&f, "https://user:pw@cdn.com/a.bin", Some("https://site.com/page")));
+        let z = read_mark(&f).unwrap();
+        assert!(z.contains("ZoneId=3") && z.contains("HostUrl=https://cdn.com/a.bin") && z.contains("ReferrerUrl=https://site.com/page"));
+        assert!(!z.contains("pw"), "不应写入密码");
+        assert_eq!(std::fs::read(&f).unwrap(), b"hello", "备用数据流不影响文件内容");
+
+        delete_file(&f, true);
+        assert!(!f.exists());
+
+        let (a, b) = (random_token(), random_token());
+        assert_eq!(a.len(), 32);
+        assert_ne!(a, b);
+
+        assert!(is_network_error("error sending request for url (https://a.com/): tcp connect error"));
+        assert!(is_network_error("连接停滞，正在重连"));
+        assert!(!is_network_error("HTTP 404"));
+        assert!(!is_network_error("磁盘空间不足"));
+        assert!(woke_from_sleep(60) && !woke_from_sleep(1));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}

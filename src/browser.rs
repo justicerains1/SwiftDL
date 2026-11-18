@@ -24,17 +24,25 @@ pub fn ext_dir() -> PathBuf {
     store::data_dir().join("extension")
 }
 
-/// 释放扩展文件（内容相同则不重写，避免浏览器认为扩展被修改）
-pub fn extract() -> std::io::Result<PathBuf> {
+/// 释放扩展文件（内容相同则不重写，避免浏览器认为扩展被修改），并写入配对信息 config.json
+pub fn extract(token: &str, port: u16) -> std::io::Result<PathBuf> {
     let dir = ext_dir();
     std::fs::create_dir_all(&dir)?;
-    for (name, data) in FILES {
+    let config = format!("{{\"token\":\"{token}\",\"port\":{port}}}");
+    for (name, data) in FILES.iter().copied().chain(std::iter::once(("config.json", config.as_bytes()))) {
         let p = dir.join(name);
         if std::fs::read(&p).ok().as_deref() != Some(data) {
             std::fs::write(&p, data)?;
         }
     }
     Ok(dir)
+}
+
+/// 扩展文件夹已释放过时，更新其中的配对信息（重新生成令牌后调用）
+pub fn refresh_config(token: &str, port: u16) {
+    if ext_dir().join("manifest.json").exists() {
+        let _ = extract(token, port);
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -75,8 +83,8 @@ pub fn detect() -> Vec<(Browser, PathBuf)> {
 }
 
 /// 打开浏览器扩展页，并在资源管理器中选中扩展文件夹
-pub fn launch(exe: &PathBuf, b: Browser) -> std::io::Result<PathBuf> {
-    let dir = extract()?;
+pub fn launch(exe: &PathBuf, b: Browser, token: &str, port: u16) -> std::io::Result<PathBuf> {
+    let dir = extract(token, port)?;
     std::process::Command::new(exe).arg(b.ext_page()).spawn()?;
     let mut arg = std::ffi::OsString::from("/select,");
     arg.push(&dir);

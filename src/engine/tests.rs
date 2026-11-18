@@ -659,3 +659,74 @@ fn hls_e2e() {
         assert!(err.contains(want), "{path}: {err}");
     }
 }
+
+#[test]
+fn reliability() {
+    let e = env("reliable");
+    let m = Manager::new(e.rt.handle().clone(), settings(&e));
+
+    // 1. 超长路径（> 260 字符）下载、标记、删除
+    let mut deep = e.dir.clone();
+    for i in 0..8 {
+        deep = deep.join(format!("很长的目录名称-long-directory-name-{i:02}"));
+    }
+    assert!(deep.as_os_str().len() > 300, "{}", deep.as_os_str().len());
+    let id = m.add(NewTask {
+        req: AddReq { url: format!("{}/file", e.base), referrer: Some("https://site.com/page".into()), ..Default::default() },
+        name: "deep.bin".into(),
+        dir: deep.clone(),
+        auto_dir: false,
+        conns: 8,
+        mode: StartMode::Now,
+        sha256: None,
+    });
+    let t = m.get(id).unwrap();
+    wait(&t, Status::Done, 60);
+    check(&t, &DATA);
+    // 2. 下载来源标记
+    let z = sys::read_mark(&t.final_path()).expect("应写入 Zone.Identifier");
+    assert!(z.contains("ZoneId=3") && z.contains(&format!("HostUrl={}/file", e.base)) && z.contains("ReferrerUrl=https://site.com/page"), "{z}");
+    m.remove(&[id], true);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!t.final_path().exists(), "长路径文件应能删除");
+
+    // 3. 磁盘空间不足：明确报错，且不自动重试
+    sys::FAKE_FREE.store(1 << 20, Relaxed);
+    let t = add(&m, &e, "/file", "nospace.bin", 8);
+    wait(&t, Status::Error, 30);
+    sys::FAKE_FREE.store(0, Relaxed);
+    let err = t.meta.lock().unwrap().error.clone().unwrap();
+    assert!(err.starts_with("磁盘空间不足"), "{err}");
+    assert_eq!(t.meta.lock().unwrap().retries, u32::MAX);
+    assert!(!t.meta.lock().unwrap().net_error);
+
+    // 4. 睡眠唤醒：正在下载的任务重建连接（重新排队而不是暂停），最终完成
+    let cur = m.settings.read().unwrap().clone();
+    m.apply_settings(Settings { speed_limit_kb: 4096, ..cur.clone() });
+    let t = add(&m, &e, "/file", "wake.bin", 4);
+    std::thread::sleep(Duration::from_millis(700));
+    assert_eq!(m.on_wake(), 1);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_ne!(t.status(), Status::Paused, "唤醒后不应停在暂停状态");
+    m.apply_settings(cur);
+    wait(&t, Status::Done, 60);
+    check(&t, &DATA);
+
+    // 5. 网络类错误：标记为网络错误、不消耗重试次数，网络恢复时立即重新排队
+    let id = m.add(NewTask {
+        req: AddReq { url: "http://127.0.0.1:9/unreachable.bin".into(), ..Default::default() },
+        name: "net.bin".into(),
+        dir: e.dir.clone(),
+        auto_dir: false,
+        conns: 2,
+        mode: StartMode::Now,
+        sha256: None,
+    });
+    let t = m.get(id).unwrap();
+    wait(&t, Status::Error, 30);
+    assert!(t.meta.lock().unwrap().net_error, "{:?}", t.meta.lock().unwrap().error);
+    assert_eq!(m.on_network_restored(), 1);
+    assert_ne!(t.status(), Status::Error, "网络恢复后应重新排队");
+    wait(&t, Status::Error, 30);
+    assert_eq!(t.meta.lock().unwrap().retries, 0, "网络错误不消耗自动重试次数");
+}

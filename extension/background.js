@@ -3,11 +3,27 @@
 // 2. 嗅探网页加载的视频/音频/m3u8，按标签页记录，图标显示数量
 import { classify, mergeItem, normalizeKey, parseMaster, suggestName, totalSize } from "./sniff.js";
 
-const DEFAULTS = { enabled: true, minSizeKB: 0, port: 52080, floatBtn: true };
+const DEFAULTS = { enabled: true, minSizeKB: 0, port: 52080, floatBtn: true, token: "" };
 const cfg = () => chrome.storage.local.get(DEFAULTS);
 
+/** 配对信息：优先使用 SwiftDL 释放扩展时写入的 config.json，否则用用户粘贴的令牌 */
+export async function pairing() {
+  const c = await cfg();
+  try {
+    const r = await fetch(chrome.runtime.getURL("config.json"));
+    if (r.ok) {
+      const j = await r.json();
+      if (j.token) {
+        if (j.token !== c.token || (j.port && j.port !== c.port)) await chrome.storage.local.set({ token: j.token, port: j.port || c.port });
+        return { token: j.token, port: j.port || c.port };
+      }
+    }
+  } catch (_) {}
+  return { token: c.token, port: c.port };
+}
+
 async function send(info) {
-  const { port } = await cfg();
+  const { port, token } = await pairing();
   let cookies = "";
   try {
     const cs = await chrome.cookies.getAll({ url: info.url });
@@ -22,9 +38,10 @@ async function send(info) {
   };
   const r = await fetch(`http://127.0.0.1:${port}/add`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-SwiftDL-Token": token },
     body: JSON.stringify(body),
   });
+  if (r.status === 403) throw new Error("未配对：请在扩展弹窗中填写 SwiftDL 设置里的配对令牌");
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
 }
 
@@ -142,6 +159,10 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     getList(tabId).then(reply, () => reply([]));
     return true;
   }
+  if (msg.type === "pairing") {
+    pairing().then(reply, () => reply({ port: 52080, token: "" }));
+    return true;
+  }
   if (msg.type === "download") {
     send({ url: msg.url, filename: msg.name, referrer: msg.referrer })
       .then(() => reply({ ok: true }))
@@ -154,9 +175,9 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
 // ───────────── 连接握手与右键菜单 ─────────────
 // 向 SwiftDL 报到，程序据此确认扩展已安装并连接
 async function hello() {
-  const { port } = await cfg();
+  const { port, token } = await pairing();
   try {
-    await fetch(`http://127.0.0.1:${port}/hello`, { method: "POST" });
+    await fetch(`http://127.0.0.1:${port}/hello`, { method: "POST", headers: { "X-SwiftDL-Token": token } });
   } catch (_) {}
 }
 

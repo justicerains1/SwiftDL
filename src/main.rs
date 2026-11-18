@@ -27,7 +27,7 @@ fn main() {
     let listener = match rt.block_on(tokio::net::TcpListener::bind(("127.0.0.1", port))) {
         Ok(l) => Some(l),
         Err(_) => {
-            if rt.block_on(server::forward(port, &urls)) {
+            if rt.block_on(server::forward(port, &settings.token, &urls)) {
                 return;
             }
             None
@@ -36,6 +36,11 @@ fn main() {
 
     let (tx, rx) = std::sync::mpsc::channel();
     let m = Manager::new(rt.handle().clone(), settings);
+    {
+        // 已释放过的扩展文件夹：同步最新的配对令牌，用户无需重新配对
+        let s = m.settings.read().unwrap();
+        browser::refresh_config(&s.token, s.port);
+    }
     if let Some(l) = listener {
         rt.spawn(server::serve(l, tx.clone(), m.clone()));
     }
@@ -49,9 +54,19 @@ fn main() {
     rt.spawn(async move {
         let mut iv = tokio::time::interval(Duration::from_millis(500));
         let mut n: u64 = 0;
+        let mut last_wall = std::time::SystemTime::now();
         loop {
             iv.tick().await;
             n += 1;
+            // 睡眠唤醒（墙钟跳变）与网络恢复：立即重建连接 / 重试网络错误
+            let wall = std::time::SystemTime::now();
+            let gap = wall.duration_since(last_wall).map(|d| d.as_secs()).unwrap_or(0);
+            last_wall = wall;
+            if engine::sys::woke_from_sleep(gap) {
+                bg.on_wake();
+            } else if engine::sys::NET_RESTORED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                bg.on_network_restored();
+            }
             let running = bg.tick();
             // 下载中每 3 秒落盘一次（内容未变则跳过），空闲时仅在有改动时保存
             if n.is_multiple_of(6) || (!running && n.is_multiple_of(2)) {
@@ -65,6 +80,7 @@ fn main() {
         }
     });
     m.schedule();
+    engine::sys::watch_network();
 
     let app_m = m.clone();
     let opts = eframe::NativeOptions {

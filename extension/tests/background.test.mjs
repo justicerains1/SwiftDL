@@ -5,13 +5,16 @@ import assert from "node:assert/strict";
 const listeners = {};
 const on = (name) => ({ addListener: (f) => (listeners[name] = f) });
 const session = {};
+const local = {};
 const badges = {};
 const posted = [];
+const postedHeaders = [];
+let serverToken = "tok-123";
 const tabs = { 7: { id: 7, title: "测试视频页", url: "https://site.com/watch/1" } };
 
 globalThis.chrome = {
   storage: {
-    local: { get: async (d) => ({ ...d }) },
+    local: { get: async (d) => ({ ...d, ...local }), set: async (o) => Object.assign(local, o) },
     session: {
       get: async (k) => (k in session ? { [k]: session[k] } : {}),
       set: async (o) => Object.assign(session, o),
@@ -21,7 +24,7 @@ globalThis.chrome = {
   action: { setBadgeText: async ({ tabId, text }) => (badges[tabId] = text), setBadgeBackgroundColor: async () => {} },
   tabs: { get: async (id) => tabs[id] ?? Promise.reject(new Error("no tab")), onUpdated: on("tabUpdated"), onRemoved: on("tabRemoved") },
   webRequest: { onHeadersReceived: on("headers") },
-  runtime: { onMessage: on("message"), onInstalled: on("installed"), onStartup: on("startup") },
+  runtime: { onMessage: on("message"), onInstalled: on("installed"), onStartup: on("startup"), getURL: (p) => `chrome-extension://abc/${p}` },
   downloads: { onCreated: on("dlCreated") },
   contextMenus: { create() {}, onClicked: on("menu") },
   cookies: { getAll: async () => [{ name: "sid", value: "abc" }] },
@@ -30,8 +33,14 @@ globalThis.fetch = async (url, opt = {}) => {
   if (url === "https://cdn.com/v/master.m3u8") {
     return new Response("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=640x360\nlow.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720\nhigh.m3u8\n");
   }
+  if (url === "chrome-extension://abc/config.json") {
+    return new Response(JSON.stringify({ token: "tok-123", port: 52080 }));
+  }
   if (url.startsWith("http://127.0.0.1:52080/add")) {
+    const tok = opt.headers["X-SwiftDL-Token"];
+    if (tok !== serverToken) return new Response("", { status: 403 });
     posted.push(JSON.parse(opt.body));
+    postedHeaders.push(opt.headers);
     return new Response("", { status: 200 });
   }
   return new Response("", { status: 404 });
@@ -72,6 +81,16 @@ test("嗅探 → 列表 → 角标 → 发送", async () => {
   assert.equal(posted.at(-1).cookies, "sid=abc");
   assert.equal(posted.at(-1).referrer, "https://site.com/watch/1");
   assert.equal(posted.at(-1).filename, "测试视频页.mp4");
+  assert.equal(postedHeaders.at(-1)["X-SwiftDL-Token"], "tok-123", "应携带 config.json 中的配对令牌");
+  assert.deepEqual(await msg({ type: "pairing" }), { token: "tok-123", port: 52080 });
+});
+
+test("令牌不匹配时返回明确的未配对错误", async () => {
+  serverToken = "regenerated";
+  const r = await msg({ type: "download", url: "https://cdn.com/a.mp4", name: "a.mp4" });
+  serverToken = "tok-123";
+  assert.equal(r.ok, false);
+  assert.match(r.error, /未配对/);
 });
 
 test("页面跳转清空，关闭标签删除记录", async () => {

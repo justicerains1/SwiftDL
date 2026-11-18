@@ -556,6 +556,25 @@ impl SettingsDialog {
                         hint(ui, p, "重启后生效");
                     });
                 });
+                section(ui, p, "安全与隐私", |ui| {
+                    row(ui, p, "删除文件", |ui| {
+                        ui.checkbox(&mut s.recycle, "移到回收站（可恢复）");
+                    });
+                    row(ui, p, "来源标记", |ui| {
+                        ui.checkbox(&mut s.motw, "为下载的文件标记“来自 Internet”，打开时由系统安全检查");
+                    });
+                    row(ui, p, "扩展配对令牌", |ui| {
+                        let shown = format!("{}...{}", &s.token[..4.min(s.token.len())], &s.token[s.token.len().saturating_sub(4)..]);
+                        ui.label(RichText::new(shown).monospace().color(p.text));
+                        if button(ui, Btn::Secondary, Some(Icon::Copy), "复制").clicked() {
+                            ui.ctx().copy_text(s.token.clone());
+                        }
+                        if button(ui, Btn::Secondary, Some(Icon::Refresh), "重新生成").on_hover_text("旧令牌立即失效；通过安装向导加载的扩展会自动更新").clicked() {
+                            s.token = crate::engine::sys::random_token();
+                        }
+                    });
+                    hint(ui, p, "浏览器扩展需携带令牌才能投递任务，防止网页或同机其他用户冒用");
+                });
                 section(ui, p, "存储与缓存", |ui| {
                     row(ui, p, "自动清理记录", |ui| {
                         ui.add(egui::DragValue::new(&mut s.clean_done_days).range(0..=3650).suffix(" 天"));
@@ -578,6 +597,9 @@ impl SettingsDialog {
                     let old_auto = m.settings.read().unwrap().autostart;
                     if self.s.autostart != old_auto && !crate::tray::set_autostart(self.s.autostart) {
                         self.s.autostart = old_auto;
+                    }
+                    if self.s.token != m.settings.read().unwrap().token {
+                        crate::browser::refresh_config(&self.s.token, self.s.port);
                     }
                     m.apply_settings(self.s.clone());
                     result = DialogResult::Close;
@@ -736,7 +758,11 @@ impl ExtGuide {
                 status_line(ui, Icon::Alert, p.warning, "未检测到 Chrome 或 Edge，可手动加载扩展文件夹");
                 ui.add_space(6.0);
                 if button(ui, Btn::Primary, Some(Icon::Folder), "打开扩展文件夹").clicked() {
-                    match browser::extract() {
+                    let res = {
+                        let st = m.settings.read().unwrap();
+                        browser::extract(&st.token, st.port)
+                    };
+                    match res {
                         Ok(dir) => {
                             ctx.copy_text(dir.display().to_string());
                             let _ = std::process::Command::new("explorer").arg(&dir).spawn();
@@ -750,7 +776,11 @@ impl ExtGuide {
                         let kind = if i == 0 { Btn::Primary } else { Btn::Secondary };
                         let label = format!("在 {} 中安装", if b == Browser::Edge { "Edge" } else { "Chrome" });
                         if button(ui, kind, Some(Icon::External), &label).on_hover_text(b.name()).clicked() {
-                            match browser::launch(&exe, b) {
+                            let res = {
+                                let st = m.settings.read().unwrap();
+                                browser::launch(&exe, b, &st.token, st.port)
+                            };
+                            match res {
                                 Ok(dir) => {
                                     ctx.copy_text(dir.display().to_string());
                                     self.launched = Some(b);

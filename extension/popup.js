@@ -1,6 +1,6 @@
 import { fmtSize } from "./sniff.js";
 
-const DEFAULTS = { enabled: true, minSizeKB: 0, port: 52080, floatBtn: true };
+const DEFAULTS = { enabled: true, minSizeKB: 0, port: 52080, floatBtn: true, token: "" };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const TAGS = { video: "视频", audio: "音频", hls: "HLS", dash: "DASH" };
@@ -10,14 +10,27 @@ chrome.storage.local.get(DEFAULTS).then(async (c) => {
   $("floatBtn").checked = c.floatBtn;
   $("minSizeKB").value = c.minSizeKB;
   $("port").value = c.port;
+  await checkConn();
+});
+
+async function checkConn() {
+  const { port, token } = await chrome.runtime.sendMessage({ type: "pairing" });
+  $("token").value = token || "";
   try {
-    const r = await fetch(`http://127.0.0.1:${c.port}/hello`, { method: "POST" });
-    $("st").textContent = r.ok ? "已连接" : "未运行";
+    const r = await fetch(`http://127.0.0.1:${port}/hello`, { method: "POST", headers: { "X-SwiftDL-Token": token || "" } });
+    $("st").textContent = r.ok ? "已连接" : r.status === 403 ? "未配对" : "未运行";
     $("st").className = r.ok ? "on" : "";
+    $("pair").hidden = r.status !== 403;
   } catch (_) {
     $("st").textContent = "SwiftDL 未运行";
+    $("pair").hidden = true;
   }
-});
+}
+
+$("savePair").onclick = async () => {
+  await chrome.storage.local.set({ token: $("token").value.trim() });
+  await checkConn();
+};
 
 $("enabled").onchange = (e) => chrome.storage.local.set({ enabled: e.target.checked });
 $("floatBtn").onchange = (e) => chrome.storage.local.set({ floatBtn: e.target.checked });

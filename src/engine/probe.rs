@@ -26,6 +26,9 @@ pub fn with_headers(mut rb: reqwest::RequestBuilder, req: &AddReq) -> reqwest::R
 }
 
 pub async fn probe(client: &reqwest::Client, req: &AddReq) -> Result<Info, String> {
+    if super::remote::is_remote(&req.url) {
+        return super::remote::probe(req).await;
+    }
     if super::hls::looks_like_hls(&req.url, "") {
         return probe_hls(client, req).await;
     }

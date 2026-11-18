@@ -3,10 +3,13 @@ pub mod hls;
 pub mod kind;
 pub mod limiter;
 pub mod probe;
+pub mod remote;
 pub mod sched;
 pub mod store;
 pub mod sys;
 pub mod task;
+#[cfg(test)]
+mod remote_tests;
 #[cfg(test)]
 mod tests;
 
@@ -52,6 +55,10 @@ pub struct AddReq {
     pub referrer: Option<String>,
     pub cookies: Option<String>,
     pub user_agent: Option<String>,
+    /// FTP/SFTP 密码（DPAPI 加密，仅当前 Windows 用户可解密）
+    pub secret: Option<String>,
+    /// SFTP 私钥文件
+    pub key_path: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -498,7 +505,8 @@ impl Manager {
         self.schedule();
     }
 
-    pub fn add(self: &Arc<Self>, n: NewTask) -> u64 {
+    pub fn add(self: &Arc<Self>, mut n: NewTask) -> u64 {
+        remote::secure_req(&mut n.req);
         let id = self.next_id.fetch_add(1, Relaxed);
         let name = if n.name.trim().is_empty() { String::new() } else { probe::sanitize(&n.name) };
         let sha256 = n.sha256.map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty());

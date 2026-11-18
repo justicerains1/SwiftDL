@@ -15,7 +15,7 @@ rfd = "0.18.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "sync", "time", "macros", "net"] }
-tokio-util = { version = "0.7", default-features = false }
+tokio-util = { version = "0.7", default-features = false, features = ["io"] }
 url = "2.5.8"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_DataExchange", "Win32_System_Power", "Win32_System_SystemInformation", "Win32_Storage_FileSystem", "Win32_UI_Shell", "Win32_Security_Cryptography", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_Globalization"] }
 sha2 = "0.11.1"
@@ -28,6 +28,11 @@ raw-window-handle = "0.6"
 windows-core = "0.62.2"
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 zip = { version = "9.7.0", default-features = false, features = ["deflate"] }
+suppaftp = { version = "13.0.0", features = ["tokio", "tokio-async-native-tls"] }
+russh = { version = "0.65.2", default-features = false, features = ["ring", "rsa", "flate2"] }
+russh-sftp = "3.0.1"
+bytes = "1"
+async-native-tls = { version = "0.6", default-features = false, features = ["runtime-tokio"] }
 
 [profile.release]
 opt-level = 3
@@ -38,3 +43,7 @@ panic = "abort"
 
 [profile.dev.package."*"]
 opt-level = 2
+
+[dev-dependencies]
+libunftp = { version = "0.25.0", default-features = false, features = ["ring"] }
+unftp-sbe-fs = "0.4.1"

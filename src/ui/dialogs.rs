@@ -136,6 +136,11 @@ fn step(ui: &mut Ui, p: &Pal, n: u32, text: &str) {
 
 // ───────────── 新建下载 ─────────────
 
+fn is_link(l: &str) -> bool {
+    let l = l.to_ascii_lowercase();
+    ["http://", "https://", "ftp://", "ftps://", "sftp://"].iter().any(|p| l.starts_with(p))
+}
+
 pub struct AddDialog {
     urls: String,
     name: String,
@@ -149,6 +154,12 @@ pub struct AddDialog {
     info: Option<Result<Info, String>>,
     /// HLS 主列表中选中的清晰度序号（0 = 最高）
     variant: usize,
+    /// FTP/SFTP 登录信息（只在单个远程链接时显示）
+    user: String,
+    pass: String,
+    key: String,
+    cred_url: String,
+    probed_key: String,
     focus: bool,
 }
 
@@ -169,6 +180,11 @@ impl AddDialog {
             probe: Arc::default(),
             info: None,
             variant: 0,
+            user: String::new(),
+            pass: String::new(),
+            key: String::new(),
+            cred_url: String::new(),
+            probed_key: String::new(),
             focus: true,
         }
     }
@@ -188,16 +204,51 @@ impl AddDialog {
         self.urls
             .lines()
             .map(str::trim)
-            .filter(|l| l.starts_with("http://") || l.starts_with("https://"))
+            .filter(|l| is_link(l))
             .map(String::from)
             .collect()
+    }
+
+    /// 单个 FTP/SFTP 链接：返回带账号密码的实际链接（新建任务时密码会被加密移出链接）
+    fn with_creds(&self, url: &str) -> String {
+        match url::Url::parse(url) {
+            Ok(mut u) if crate::engine::remote::is_remote(url) => {
+                if !self.user.trim().is_empty() {
+                    let _ = u.set_username(self.user.trim());
+                }
+                if !self.pass.is_empty() {
+                    let _ = u.set_password(Some(&self.pass));
+                }
+                u.to_string()
+            }
+            _ => url.to_string(),
+        }
+    }
+
+    /// 首次看到某个远程链接时，从链接中带出用户名和密码
+    fn prefill_creds(&mut self, url: &str) {
+        if url == self.cred_url || !crate::engine::remote::is_remote(url) {
+            return;
+        }
+        self.cred_url = url.to_string();
+        if let Ok(u) = url::Url::parse(url) {
+            fn dec(s: &str) -> String {
+                percent_encoding::percent_decode_str(s).decode_utf8_lossy().into_owned()
+            }
+            self.user = dec(u.username());
+            self.pass = u.password().map(dec).unwrap_or_default();
+        }
     }
 
     /// 单链接时后台探测文件名和大小
     fn auto_probe(&mut self, m: &Arc<Manager>) {
         let list = self.url_list();
         let url = if list.len() == 1 { list[0].clone() } else { String::new() };
-        if url != self.probed_url {
+        self.prefill_creds(&url);
+        let eff = self.with_creds(&url);
+        let key = format!("{eff}|{}", self.key);
+        if key != self.probed_key {
+            self.probed_key = key.clone();
             self.probed_url = url.clone();
             self.info = None;
             self.variant = 0;
@@ -205,7 +256,9 @@ impl AddDialog {
                 let slot = self.probe.clone();
                 let client = m.client();
                 let mut req = self.extra.clone();
-                req.url = url.clone();
+                req.url = eff;
+                req.key_path = Some(self.key.clone()).filter(|k| !k.trim().is_empty());
+                let url = key;
                 let mm = m.clone();
                 m.rt.spawn(async move {
                     let r = probe::probe(&client, &req).await;
@@ -215,7 +268,7 @@ impl AddDialog {
             }
         }
         if let Some((u, r)) = self.probe.lock().unwrap().take()
-            && u == self.probed_url
+            && u == self.probed_key
         {
             if let Ok(i) = &r
                 && !self.name_edited
@@ -343,6 +396,29 @@ impl AddDialog {
                     });
                 ui.add_space(10.0);
             }
+            if n == 1 && crate::engine::remote::is_remote(&list[0]) {
+                row(ui, p, tr!("用户名"), |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.user).desired_width(ui.available_width()).hint_text("anonymous"));
+                });
+                row(ui, p, tr!("密码"), |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.pass).password(true).desired_width(ui.available_width()));
+                });
+                if list[0].to_ascii_lowercase().starts_with("sftp://") {
+                    row(ui, p, tr!("私钥文件"), |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.key)
+                                .desired_width(ui.available_width() - 40.0)
+                                .hint_text(tr!("留空使用 ~/.ssh 中的默认密钥")),
+                        );
+                        if icon_button(ui, Icon::Folder, tr!("选择私钥文件"), true).clicked()
+                            && let Some(f) = rfd::FileDialog::new().pick_file()
+                        {
+                            self.key = f.display().to_string();
+                        }
+                    });
+                }
+                hint(ui, p, tr!("密码使用 Windows 账户加密保存，不会以明文写入磁盘"));
+            }
             row(ui, p, tr!("保存到"), |ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.dir).desired_width(ui.available_width() - 40.0));
                 if icon_button(ui, Icon::Folder, tr!("选择文件夹"), true).clicked()
@@ -405,6 +481,10 @@ impl AddDialog {
                 };
                 for u in list {
                     let mut req = self.extra.clone();
+                    if single && crate::engine::remote::is_remote(&u) {
+                        req.key_path = Some(self.key.clone()).filter(|k| !k.trim().is_empty());
+                    }
+                    let u = if single { self.with_creds(&u) } else { u };
                     req.url = chosen.clone().unwrap_or(u);
                     m.add(NewTask {
                         req,

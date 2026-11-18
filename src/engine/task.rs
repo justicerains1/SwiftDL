@@ -456,15 +456,31 @@ async fn worker(c: &Ctx, seg: &Seg) -> End {
     }
 }
 
+type Chunks = std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, String>> + Send>>;
+
 async fn fetch(c: &Ctx, seg: &Seg) -> Result<(), FErr> {
+    use futures_util::StreamExt;
     let SegPos { pos, end } = *seg.st.lock().unwrap();
     let req = c.t.req();
+    // FTP / SFTP：按偏移打开字节流，其余逻辑与 HTTP 共用
+    if super::remote::is_remote(&req.url) {
+        use super::remote::Fail;
+        let s = tokio::select! {
+            r = super::remote::open(&req, pos) => r.map_err(|f| match f {
+                Fail::Net(m) => FErr::net(m),
+                Fail::Fatal(m) => FErr { msg: m, throttle: false, fatal: true },
+                Fail::Throttle(m) => FErr { msg: m, throttle: true, fatal: false },
+            })?,
+            _ = c.tok.cancelled() => return Err(FErr::net(CANCELLED.into())),
+        };
+        return pump(c, seg, pos, Box::pin(s.map(|r| r.map_err(|f| f.msg().to_string())))).await;
+    }
     let mut rb = probe::with_headers(c.client.get(&req.url), &req);
     if c.resumable {
         let last = if end == u64::MAX { String::new() } else { (end - 1).to_string() };
         rb = rb.header(reqwest::header::RANGE, format!("bytes={pos}-{last}"));
     }
-    let mut resp = tokio::select! {
+    let resp = tokio::select! {
         r = rb.send() => r.map_err(|e| FErr::net(err_str(e)))?,
         _ = c.tok.cancelled() => return Err(FErr::net(CANCELLED.into())),
     };
@@ -495,7 +511,12 @@ async fn fetch(c: &Ctx, seg: &Seg) -> Result<(), FErr> {
     } else if !(200..300).contains(&st) {
         return Err(FErr::net(format!("HTTP {st}")));
     }
+    pump(c, seg, pos, Box::pin(resp.bytes_stream().map(|r| r.map_err(err_str)))).await
+}
 
+/// 通用数据泵：从字节流读取，认领分段字节、限速、缓冲写盘、停滞检测
+async fn pump(c: &Ctx, seg: &Seg, pos: u64, mut stream: Chunks) -> Result<(), FErr> {
+    use futures_util::StreamExt;
     let stall = Duration::from_millis(STALL_MS.load(Relaxed));
     let mut buf: Vec<u8> = Vec::with_capacity(BUF);
     let mut off = pos;
@@ -503,15 +524,15 @@ async fn fetch(c: &Ctx, seg: &Seg) -> Result<(), FErr> {
         let chunk = tokio::select! {
             biased;
             _ = c.tok.cancelled() => break Err(CANCELLED.into()),
-            r = tokio::time::timeout(stall, resp.chunk()) => match r {
-                Ok(r) => r,
+            r = tokio::time::timeout(stall, stream.next()) => match r {
+                Ok(r) => r.transpose(),
                 Err(_) => break Err(tr!("连接停滞，正在重连").into()),
             },
         };
         let chunk = match chunk {
             Ok(Some(b)) => b,
             Ok(None) => break Ok(()),
-            Err(e) => break Err(err_str(e)),
+            Err(e) => break Err(e),
         };
         // 大块切成小片：先取令牌再认领，限速平滑且速度显示不跳变
         let mut rest: &[u8] = &chunk;

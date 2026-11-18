@@ -1122,7 +1122,7 @@ impl App {
             let reqs: Vec<AddReq> = text
                 .lines()
                 .map(str::trim)
-                .filter(|l| l.starts_with("http://") || l.starts_with("https://"))
+                .filter(|l| ["http://", "https://", "ftp://", "ftps://", "sftp://"].iter().any(|p| l.to_ascii_lowercase().starts_with(p)))
                 .map(|u| AddReq { url: u.into(), ..Default::default() })
                 .collect();
             if !reqs.is_empty() {
@@ -1489,6 +1489,7 @@ mod tests {
             "engine/probe.rs",
             "engine/kind.rs",
             "engine/hls.rs",
+            "engine/remote.rs",
             "tray.rs",
             "browser.rs",
         ];

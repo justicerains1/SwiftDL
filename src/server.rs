@@ -46,7 +46,8 @@ async fn add(State(s): State<St>, h: HeaderMap, Json(req): Json<AddReq>) -> Stat
     if !allowed(&s, &h) {
         return StatusCode::FORBIDDEN;
     }
-    if !(req.url.starts_with("http://") || req.url.starts_with("https://")) {
+    let l = req.url.to_ascii_lowercase();
+    if !["http://", "https://", "ftp://", "ftps://", "sftp://"].iter().any(|p| l.starts_with(p)) {
         return StatusCode::BAD_REQUEST;
     }
     let _ = s.tx.send(UiEvent::Add(vec![req]));

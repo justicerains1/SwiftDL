@@ -804,7 +804,11 @@ impl App {
                 format!("{} / {}", t.active_conns.load(Relaxed), t.conns)
             };
             kv(&mut c[1], tr!("连接数"), conns);
-            if let Some(h) = &hls {
+            let bt = t.meta.lock().unwrap().bt.clone();
+            if let Some(b) = &bt {
+                kv(&mut c[0], tr!("类型"), trf!("BT 任务  {} 个文件", b.file_count));
+                kv(&mut c[1], tr!("节点"), trf!("{} 个    已上传 {}", b.peers, fmt_size(b.uploaded)));
+            } else if let Some(h) = &hls {
                 let mut kind = vec![tr!("HLS 流媒体")];
                 if h.encrypted {
                     kind.push(tr!("AES-128 加密"));
@@ -1122,7 +1126,9 @@ impl App {
             let reqs: Vec<AddReq> = text
                 .lines()
                 .map(str::trim)
-                .filter(|l| ["http://", "https://", "ftp://", "ftps://", "sftp://"].iter().any(|p| l.to_ascii_lowercase().starts_with(p)))
+                .filter(|l| {
+                    ["http://", "https://", "ftp://", "ftps://", "sftp://"].iter().any(|p| l.to_ascii_lowercase().starts_with(p)) || crate::engine::bt::is_bt(l)
+                })
                 .map(|u| AddReq { url: u.into(), ..Default::default() })
                 .collect();
             if !reqs.is_empty() {
@@ -1490,6 +1496,7 @@ mod tests {
             "engine/kind.rs",
             "engine/hls.rs",
             "engine/remote.rs",
+            "engine/bt.rs",
             "tray.rs",
             "browser.rs",
         ];

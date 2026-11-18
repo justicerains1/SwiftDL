@@ -33,6 +33,7 @@ russh = { version = "0.65.2", default-features = false, features = ["ring", "rsa
 russh-sftp = "3.0.1"
 bytes = "1"
 async-native-tls = { version = "0.6", default-features = false, features = ["runtime-tokio"] }
+librqbit = { version = "9.1.0", default-features = false, features = ["default-tls"] }
 
 [profile.release]
 opt-level = 3

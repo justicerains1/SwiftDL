@@ -76,6 +76,10 @@ pub fn strip_credentials(url: &str) -> String {
 
 /// 写入“来自 Internet”标记（Zone.Identifier 备用数据流），让 SmartScreen / Office 受保护视图生效
 pub fn mark_from_web(path: &Path, host_url: &str, referrer: Option<&str>) -> bool {
+    // 只标记已存在的普通文件：对不存在的路径写备用数据流会凭空创建一个空文件
+    if !path.is_file() {
+        return false;
+    }
     let mut s = String::from("[ZoneTransfer]\r\nZoneId=3\r\n");
     if let Some(r) = referrer.filter(|r| r.starts_with("http")) {
         s.push_str(&format!("ReferrerUrl={}\r\n", strip_credentials(r)));

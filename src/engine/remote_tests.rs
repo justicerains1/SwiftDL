@@ -302,3 +302,102 @@ fn sftp_download() {
     assert!(e.contains("主机密钥已变化"), "{e}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ───────────── BT（离线：本进程内的做种方作为初始节点） ─────────────
+
+#[test]
+fn bt_download() {
+    let (rt, root, m) = setup("bt");
+    let cur = m.settings.read().unwrap().clone();
+    m.apply_settings(Settings { bt_dht: false, bt_upnp: false, bt_port: 0, ..cur });
+
+    // 做种方：包含两个文件的种子
+    let seed_root = root.join("seed");
+    let pack = seed_root.join("pack");
+    std::fs::create_dir_all(&pack).unwrap();
+    let a = &FILE[..3 << 20];
+    let b = &FILE[3 << 20..5 << 20];
+    std::fs::write(pack.join("a.bin"), a).unwrap();
+    std::fs::write(pack.join("b.bin"), b).unwrap();
+    let seeder = rt
+        .block_on(librqbit::Session::new_with_opts(
+            seed_root.clone(),
+            librqbit::SessionOptions {
+                dht: None,
+                disable_trackers: true,
+                listen: Some(librqbit::ListenerOptions {
+                    listen_addr: "127.0.0.1:0".parse().unwrap(),
+                    enable_upnp_port_forwarding: false,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    let (res, _h) = rt
+        .block_on(seeder.create_and_serve_torrent(&pack, librqbit::CreateTorrentOptions { piece_length: Some(256 << 10), ..Default::default() }))
+        .unwrap();
+    let addr = seeder.listen_addr().unwrap();
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", addr.port()).parse().unwrap();
+    *bt::TEST_PEERS.lock().unwrap() = vec![addr];
+    let torrent = root.join("pack.torrent");
+    std::fs::write(&torrent, res.as_bytes().unwrap()).unwrap();
+    let file_url = url::Url::from_file_path(&torrent).unwrap().to_string();
+    std::thread::sleep(Duration::from_millis(500));
+
+    // 1. 读取种子信息，只下载 b.bin
+    let info = rt.block_on(bt::probe(&m, &m.client(), &AddReq { url: file_url.clone(), ..Default::default() })).unwrap();
+    let bi = info.bt.unwrap();
+    assert_eq!(bi.name, "pack");
+    assert_eq!(bi.files.len(), 2);
+    let idx_b = bi.files.iter().position(|f| f.0.ends_with("b.bin")).unwrap();
+    let dl = root.join("dl");
+    let id = m.add(NewTask {
+        req: AddReq { url: file_url, bt_files: Some(vec![idx_b]), ..Default::default() },
+        name: String::new(),
+        dir: dl.clone(),
+        auto_dir: false,
+        conns: 8,
+        mode: StartMode::Now,
+        sha256: None,
+    });
+    let t = m.get(id).unwrap();
+    assert_eq!(wait_end(&t, 90), Status::Done, "{:?}", t.meta.lock().unwrap().error);
+    assert_eq!(t.meta.lock().unwrap().name, "pack");
+    assert!(walk(&dl).iter().all(|f| f.starts_with(dl.join("pack"))), "多文件种子应放在以种子名命名的文件夹中：{:?}", walk(&dl));
+    assert!(std::fs::read(dl.join("pack").join("b.bin")).unwrap() == b, "选中的文件内容应一致");
+    assert!(std::fs::read(dl.join("pack").join("a.bin")).map(|d| d != a).unwrap_or(true), "未选中的文件不应完整下载");
+
+    // 2. 磁力链接：从节点获取元数据后下载全部文件
+    let dl2 = root.join("dl2");
+    let id = m.add(NewTask {
+        req: AddReq { url: res.as_magnet().to_string(), ..Default::default() },
+        name: String::new(),
+        dir: dl2.clone(),
+        auto_dir: false,
+        conns: 8,
+        mode: StartMode::Now,
+        sha256: None,
+    });
+    let t = m.get(id).unwrap();
+    assert_eq!(wait_end(&t, 90), Status::Done, "{:?}", t.meta.lock().unwrap().error);
+    assert!(std::fs::read(dl2.join("pack").join("a.bin")).unwrap() == a);
+    assert!(std::fs::read(dl2.join("pack").join("b.bin")).unwrap() == b);
+    assert_eq!(t.meta.lock().unwrap().size, Some(5 << 20));
+    let hash = t.meta.lock().unwrap().bt.clone().unwrap().info_hash;
+    assert_eq!(hash.len(), 40);
+
+    bt::TEST_PEERS.lock().unwrap().clear();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn walk(d: &Path) -> Vec<PathBuf> {
+    let mut out = vec![];
+    if let Ok(rd) = std::fs::read_dir(d) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() { out.extend(walk(&p)); } else { out.push(p); }
+        }
+    }
+    out
+}

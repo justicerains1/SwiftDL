@@ -180,6 +180,7 @@ impl Taskbar {
 pub fn links_from_drop(text: Option<&str>, files: &[PathBuf]) -> Vec<String> {
     let schemes = ["http://", "https://", "ftp://", "ftps://", "sftp://", "magnet:?"];
     let mut out: Vec<String> = Vec::new();
+    let mut torrents: Vec<String> = Vec::new();
     let mut push = |s: &str| {
         let s = s.trim().trim_matches(|c| c == '"' || c == '\'' || c == '<' || c == '>');
         if schemes.iter().any(|p| s.to_ascii_lowercase().starts_with(p)) && !out.iter().any(|x| x == s) {
@@ -198,6 +199,11 @@ pub fn links_from_drop(text: Option<&str>, files: &[PathBuf]) -> Vec<String> {
                     t.split_whitespace().for_each(&mut push);
                 }
             }
+            "torrent" => {
+                if let Ok(u) = url::Url::from_file_path(f) {
+                    torrents.push(u.to_string());
+                }
+            }
             "url" => {
                 if let Some(t) = read() {
                     t.lines().filter_map(|l| l.trim().strip_prefix("URL=")).for_each(&mut push);
@@ -206,6 +212,7 @@ pub fn links_from_drop(text: Option<&str>, files: &[PathBuf]) -> Vec<String> {
             _ => {}
         }
     }
+    out.extend(torrents);
     out
 }
 

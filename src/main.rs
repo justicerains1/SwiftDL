@@ -27,7 +27,20 @@ fn main() {
     let minimized = args.iter().any(|a| a == "--minimized");
     let updated = args.iter().any(|a| a == "--updated");
     update::cleanup_old();
-    let urls: Vec<String> = args.into_iter().filter(|a| a.starts_with("http")).collect();
+    // 命令行：http(s)/ftp/sftp 链接、磁力链接、.torrent 文件（文件关联打开时）
+    let urls: Vec<String> = args
+        .into_iter()
+        .filter_map(|a| {
+            let l = a.to_ascii_lowercase();
+            if ["http://", "https://", "ftp://", "ftps://", "sftp://", "magnet:?"].iter().any(|p| l.starts_with(p)) {
+                Some(a)
+            } else if l.ends_with(".torrent") && std::path::Path::new(&a).is_file() {
+                url::Url::from_file_path(std::fs::canonicalize(&a).unwrap_or(a.into())).ok().map(|u| u.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
     let settings = engine::store::load_settings();
     i18n::apply(settings.lang);
     let port = settings.port;

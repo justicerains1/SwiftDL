@@ -137,8 +137,8 @@ fn step(ui: &mut Ui, p: &Pal, n: u32, text: &str) {
 // ───────────── 新建下载 ─────────────
 
 fn is_link(l: &str) -> bool {
-    let l = l.to_ascii_lowercase();
-    ["http://", "https://", "ftp://", "ftps://", "sftp://"].iter().any(|p| l.starts_with(p))
+    let low = l.to_ascii_lowercase();
+    ["http://", "https://", "ftp://", "ftps://", "sftp://"].iter().any(|p| low.starts_with(p)) || crate::engine::bt::is_bt(l)
 }
 
 pub struct AddDialog {
@@ -160,6 +160,8 @@ pub struct AddDialog {
     key: String,
     cred_url: String,
     probed_key: String,
+    /// BT：每个文件是否下载
+    bt_sel: Vec<bool>,
     focus: bool,
 }
 
@@ -185,6 +187,7 @@ impl AddDialog {
             key: String::new(),
             cred_url: String::new(),
             probed_key: String::new(),
+            bt_sel: Vec::new(),
             focus: true,
         }
     }
@@ -261,7 +264,11 @@ impl AddDialog {
                 let url = key;
                 let mm = m.clone();
                 m.rt.spawn(async move {
-                    let r = probe::probe(&client, &req).await;
+                    let r = if crate::engine::bt::is_bt(&req.url) {
+                        crate::engine::bt::probe(&mm, &client, &req).await
+                    } else {
+                        probe::probe(&client, &req).await
+                    };
                     *slot.lock().unwrap() = Some((url, r));
                     mm.repaint();
                 });
@@ -274,6 +281,9 @@ impl AddDialog {
                 && !self.name_edited
             {
                 self.name = i.filename.clone();
+            }
+            if let Ok(i) = &r {
+                self.bt_sel = i.bt.as_ref().map(|b| vec![true; b.files.len()]).unwrap_or_default();
             }
             self.info = Some(r);
         }
@@ -335,7 +345,23 @@ impl AddDialog {
                                     ui.horizontal(|ui| match &self.info {
                                         None => {
                                             ui.add(egui::Spinner::new().size(12.0));
-                                            ui.label(RichText::new(tr!("正在获取文件信息")).size(12.5).color(p.weak));
+                                            let msg = if crate::engine::bt::is_bt(&self.probed_url) {
+                                                tr!("正在获取种子信息（磁力链接需要从 DHT 网络查找节点，可能需要一些时间）")
+                                            } else {
+                                                tr!("正在获取文件信息")
+                                            };
+                                            ui.label(RichText::new(msg).size(12.5).color(p.weak));
+                                        }
+                                        Some(Ok(i)) if i.bt.is_some() => {
+                                            let b = i.bt.as_ref().unwrap();
+                                            let sel: u64 = b.files.iter().zip(&self.bt_sel).filter(|(_, s)| **s).map(|(f, _)| f.1).sum();
+                                            ui.label(
+                                                RichText::new(trf!("BT 任务  {} 个文件  已选 {} / 共 {}", b.files.len(), fmt_size(sel), fmt_size(i.size.unwrap_or(0))))
+                                                    .size(12.5)
+                                                    .color(p.text),
+                                            )
+                                            .on_hover_text(format!("{}
+info hash: {}", b.name, b.info_hash));
                                         }
                                         Some(Ok(i)) if i.hls.is_some() => {
                                             let h = i.hls.as_ref().unwrap();
@@ -419,6 +445,35 @@ impl AddDialog {
                 }
                 hint(ui, p, tr!("密码使用 Windows 账户加密保存，不会以明文写入磁盘"));
             }
+            let bt_files = match &self.info {
+                Some(Ok(i)) if n == 1 => i.bt.as_ref().map(|b| b.files.clone()),
+                _ => None,
+            };
+            if let Some(files) = bt_files.filter(|f| f.len() > 1) {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(tr!("选择要下载的文件")).color(p.text));
+                    if ui.small_button(tr!("全选")).clicked() {
+                        self.bt_sel.iter_mut().for_each(|s| *s = true);
+                    }
+                    if ui.small_button(tr!("全不选")).clicked() {
+                        self.bt_sel.iter_mut().for_each(|s| *s = false);
+                    }
+                });
+                Frame::new().fill(p.bg).stroke(Stroke::new(1.0, p.stroke)).corner_radius(8).inner_margin(Margin::same(8)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+                        for (k, (name, len)) in files.iter().enumerate() {
+                            if let Some(on) = self.bt_sel.get_mut(k) {
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(on, name.as_str());
+                                    ui.label(RichText::new(fmt_size(*len)).size(12.0).color(p.weak));
+                                });
+                            }
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+            }
             row(ui, p, tr!("保存到"), |ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.dir).desired_width(ui.available_width() - 40.0));
                 if icon_button(ui, Icon::Folder, tr!("选择文件夹"), true).clicked()
@@ -479,8 +534,12 @@ impl AddDialog {
                     Some(Ok(i)) if single && self.variant > 0 => i.hls.as_ref().and_then(|h| h.variants.get(self.variant)).map(|v| v.url.clone()),
                     _ => None,
                 };
+                // BT：只下载勾选的文件（全选时不限制）
+                let bt_pick = (single && !self.bt_sel.is_empty() && !self.bt_sel.iter().all(|s| *s))
+                    .then(|| self.bt_sel.iter().enumerate().filter(|(_, s)| **s).map(|(k, _)| k).collect::<Vec<_>>());
                 for u in list {
                     let mut req = self.extra.clone();
+                    req.bt_files = bt_pick.clone();
                     if single && crate::engine::remote::is_remote(&u) {
                         req.key_path = Some(self.key.clone()).filter(|k| !k.trim().is_empty());
                     }
@@ -602,6 +661,31 @@ impl SettingsDialog {
                     } else {
                         hint(ui, p, tr!("停止时间留空表示不自动暂停；开始晚于停止表示跨午夜"));
                     }
+                });
+                section(ui, p, tr!("BT / 磁力"), |ui| {
+                    row(ui, p, tr!("监听端口"), |ui| {
+                        ui.add(egui::DragValue::new(&mut s.bt_port).range(0..=65535));
+                        hint(ui, p, tr!("0 为随机，重启后生效"));
+                    });
+                    row(ui, p, tr!("网络"), |ui| {
+                        ui.checkbox(&mut s.bt_dht, tr!("DHT 网络（磁力链接需要）"));
+                        ui.checkbox(&mut s.bt_upnp, tr!("UPnP 端口映射"));
+                    });
+                    row(ui, p, tr!("做种"), |ui| {
+                        ui.checkbox(&mut s.bt_seed, tr!("下载完成后继续做种"));
+                    });
+                    row(ui, p, tr!("上传限速"), |ui| {
+                        ui.add(egui::DragValue::new(&mut s.bt_upload_kb).speed(16).range(0..=10_000_000).suffix(" KB/s"));
+                        hint(ui, p, tr!("0 表示不限速"));
+                    });
+                    row(ui, p, tr!("文件关联"), |ui| {
+                        if button(ui, Btn::Secondary, None, tr!("关联磁力链接与 .torrent")).clicked() {
+                            self.cleaned = crate::engine::bt::set_association(true);
+                        }
+                        if button(ui, Btn::Secondary, None, tr!("取消关联")).clicked() {
+                            crate::engine::bt::set_association(false);
+                        }
+                    });
                 });
                 section(ui, p, tr!("网络"), |ui| {
                     row(ui, p, tr!("代理"), |ui| {

@@ -47,7 +47,7 @@ async fn add(State(s): State<St>, h: HeaderMap, Json(req): Json<AddReq>) -> Stat
         return StatusCode::FORBIDDEN;
     }
     let l = req.url.to_ascii_lowercase();
-    if !["http://", "https://", "ftp://", "ftps://", "sftp://"].iter().any(|p| l.starts_with(p)) {
+    if !["http://", "https://", "ftp://", "ftps://", "sftp://", "magnet:?"].iter().any(|p| l.starts_with(p)) && !crate::engine::bt::is_bt(&req.url) {
         return StatusCode::BAD_REQUEST;
     }
     let _ = s.tx.send(UiEvent::Add(vec![req]));

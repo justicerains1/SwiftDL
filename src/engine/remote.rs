@@ -167,7 +167,7 @@ async fn ftp_probe(req: &AddReq, u: &url::Url) -> Result<Info, String> {
     // REST 被接受即支持断点续传与多连接
     let resumable = ftp_do!(&mut conn, s => s.resume_transfer(0).await).is_ok();
     let _ = ftp_do!(&mut conn, s => s.quit().await);
-    Ok(Info { size: Some(size), resumable, filename: file_name(u), validator: None, hls: None })
+    Ok(Info { size: Some(size), resumable, filename: file_name(u), validator: None, hls: None, bt: None })
 }
 
 /// 读取流与保持其所需连接的组合
@@ -316,7 +316,7 @@ async fn sftp_probe(req: &AddReq, u: &url::Url) -> Result<Info, String> {
     let s = sftp_connect(u, &c).await.map_err(|e| e.msg().to_string())?;
     let md = s.session.metadata(remote_path(u)).await.map_err(|e| sftp_fail(e).msg().to_string())?;
     let validator = md.mtime.map(|t| t.to_string());
-    Ok(Info { size: md.size, resumable: md.size.is_some(), filename: file_name(u), validator, hls: None })
+    Ok(Info { size: md.size, resumable: md.size.is_some(), filename: file_name(u), validator, hls: None, bt: None })
 }
 
 async fn sftp_open(req: &AddReq, u: &url::Url, pos: u64) -> Result<ByteStream, Fail> {

@@ -1,4 +1,5 @@
 //! 下载管理器：任务表、队列调度、限速、持久化、定期清理缓存、计划任务。
+pub mod bt;
 pub mod hls;
 pub mod kind;
 pub mod limiter;
@@ -59,6 +60,8 @@ pub struct AddReq {
     pub secret: Option<String>,
     /// SFTP 私钥文件
     pub key_path: Option<String>,
+    /// BT：选中下载的文件序号（None 为全部）
+    pub bt_files: Option<Vec<usize>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +113,14 @@ pub struct Settings {
     pub skip_version: String,
     /// 界面语言
     pub lang: crate::i18n::LangSetting,
+    /// BT 监听端口（0 为随机）
+    pub bt_port: u16,
+    pub bt_upnp: bool,
+    pub bt_dht: bool,
+    /// 下载完成后继续做种
+    pub bt_seed: bool,
+    /// BT 上传限速 KB/s，0 为不限
+    pub bt_upload_kb: u64,
 }
 
 impl Default for Settings {
@@ -147,6 +158,11 @@ impl Default for Settings {
             last_update_check: 0,
             skip_version: String::new(),
             lang: crate::i18n::LangSetting::System,
+            bt_port: 6881,
+            bt_upnp: true,
+            bt_dht: true,
+            bt_seed: false,
+            bt_upload_kb: 0,
         }
     }
 }
@@ -203,6 +219,8 @@ pub struct Meta {
     pub hls: Option<hls::HlsState>,
     /// 最近一次错误属于网络类（网络恢复后自动重试，不消耗重试次数）
     pub net_error: bool,
+    /// BT 任务信息
+    pub bt: Option<bt::BtState>,
 }
 
 pub struct Task {
@@ -288,6 +306,7 @@ impl Task {
             hash: m.hash.clone(),
             retries: m.retries,
             hls: m.hls.clone(),
+            bt: m.bt.clone(),
         }
     }
 
@@ -327,6 +346,7 @@ impl Task {
                 relink: false,
                 hls: r.hls,
                 net_error: false,
+                bt: r.bt,
             }),
             status: AtomicU8::new(r.status as u8),
             downloaded: AtomicU64::new(downloaded),
@@ -491,6 +511,7 @@ impl Manager {
         if old.proxy != s.proxy {
             *self.client.write().unwrap() = build_client(&s.proxy);
         }
+        let bt_limits = old.speed_limit_kb != s.speed_limit_kb || old.bt_upload_kb != s.bt_upload_kb;
         if old.speed_limit_kb != s.speed_limit_kb {
             self.limiter.set_rate(s.speed_limit_kb * 1024);
         }
@@ -502,6 +523,9 @@ impl Manager {
         }
         store::save_settings(&s);
         *self.settings.write().unwrap() = s;
+        if bt_limits {
+            bt::apply_limits(self);
+        }
         self.schedule();
     }
 
@@ -532,6 +556,7 @@ impl Manager {
             hash: None,
             retries: 0,
             hls: None,
+            bt: None,
         });
         self.tasks.write().unwrap().push(t);
         // 计划任务若正处于时间窗内，立即开始
@@ -612,6 +637,12 @@ impl Manager {
                         break;
                     }
                     tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                let bt_hash = t.meta.lock().unwrap().bt.as_ref().map(|b| b.info_hash.clone()).filter(|h| !h.is_empty());
+                if let Some(h) = bt_hash {
+                    // BT：从会话移除，按需删除已下载的文件（可能是文件夹）
+                    bt::forget(&h, delete_file).await;
+                    continue;
                 }
                 let _ = std::fs::remove_file(t.part_path());
                 if delete_file && t.status() == Status::Done {

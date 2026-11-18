@@ -756,6 +756,7 @@ fn sqlite_migration() {
         hash: None,
         retries: 0,
         hls: None,
+        bt: None,
     };
     let old = vec![mk(5, "a.zip", Status::Done), mk(9, "b.iso", Status::Paused), mk(7, "c.mp4", Status::Done)];
     store::write_bytes("tasks.json", &store::encode(&old));

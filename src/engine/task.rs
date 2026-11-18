@@ -118,6 +118,9 @@ impl FErr {
 
 async fn run_inner(m: &Arc<Manager>, t: &Arc<Task>, tok: &CancellationToken) -> Result<(), String> {
     let client = m.client();
+    if super::bt::is_bt(&t.url()) {
+        return super::bt::run(m, t, tok, client).await;
+    }
     let req = t.req();
     let info = tokio::select! {
         r = probe::probe(&client, &req) => r?,

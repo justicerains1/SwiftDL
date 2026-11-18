@@ -1,8 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod browser;
 mod clipboard;
 mod engine;
 mod server;
+mod tray;
 mod ui;
 
 use engine::{AddReq, Manager, UiEvent};
@@ -15,7 +17,9 @@ fn main() {
         .enable_all()
         .build()
         .expect("tokio runtime");
-    let urls: Vec<String> = std::env::args().skip(1).filter(|a| a.starts_with("http")).collect();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let minimized = args.iter().any(|a| a == "--minimized");
+    let urls: Vec<String> = args.into_iter().filter(|a| a.starts_with("http")).collect();
     let settings = engine::store::load_settings();
     let port = settings.port;
 
@@ -49,8 +53,10 @@ fn main() {
             iv.tick().await;
             n += 1;
             let running = bg.tick();
-            if n.is_multiple_of(2) {
-                bg.save_if_needed(running);
+            // 下载中每 3 秒落盘一次（内容未变则跳过），空闲时仅在有改动时保存
+            if n.is_multiple_of(6) || (!running && n.is_multiple_of(2)) {
+                let c = bg.clone();
+                tokio::task::spawn_blocking(move || c.save_if_needed(running));
             }
             if n == 10 || n.is_multiple_of(3600) {
                 let c = bg.clone();
@@ -69,7 +75,7 @@ fn main() {
             .with_icon(Arc::new(ui::app_icon())),
         ..Default::default()
     };
-    if let Err(e) = eframe::run_native("SwiftDL", opts, Box::new(move |cc| Ok(Box::new(ui::App::new(cc, app_m, rx))))) {
+    if let Err(e) = eframe::run_native("SwiftDL", opts, Box::new(move |cc| Ok(Box::new(ui::App::new(cc, app_m, rx, minimized))))) {
         eprintln!("界面启动失败: {e}");
         rfd::MessageDialog::new()
             .set_level(rfd::MessageLevel::Error)

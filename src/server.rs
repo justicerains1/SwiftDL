@@ -18,6 +18,7 @@ pub async fn serve(listener: tokio::net::TcpListener, tx: Sender<UiEvent>, m: Ar
         .route("/ping", get(|| async { "swiftdl" }))
         .route("/add", post(add))
         .route("/show", post(show))
+        .route("/hello", post(hello))
         .with_state(St { tx, m });
     let _ = axum::serve(listener, app).await;
 }
@@ -47,6 +48,16 @@ async fn show(State(s): State<St>, h: HeaderMap) -> StatusCode {
         return StatusCode::FORBIDDEN;
     }
     let _ = s.tx.send(UiEvent::Show);
+    s.m.repaint();
+    StatusCode::OK
+}
+
+/// 扩展启动/安装时报到，用于确认扩展已连接
+async fn hello(State(s): State<St>, h: HeaderMap) -> StatusCode {
+    if !allowed(&h) {
+        return StatusCode::FORBIDDEN;
+    }
+    crate::browser::LAST_HELLO.store(crate::engine::now(), std::sync::atomic::Ordering::Relaxed);
     s.m.repaint();
     StatusCode::OK
 }

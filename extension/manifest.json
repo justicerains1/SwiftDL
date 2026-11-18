@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SwiftDL 下载接管",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "把浏览器下载交给 SwiftDL 多线程加速",
   "permissions": ["downloads", "cookies", "storage", "contextMenus"],
   "host_permissions": ["<all_urls>"],

@@ -44,9 +44,19 @@ chrome.downloads.onCreated.addListener(async (item) => {
   }
 });
 
+// 向 SwiftDL 报到，程序据此确认扩展已安装并连接
+async function hello() {
+  const { port } = await cfg();
+  try {
+    await fetch(`http://127.0.0.1:${port}/hello`, { method: "POST" });
+  } catch (_) {}
+}
+
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({ id: "swiftdl-link", title: "使用 SwiftDL 下载", contexts: ["link", "video", "audio", "image"] });
+  hello();
 });
+chrome.runtime.onStartup.addListener(hello);
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   const url = info.linkUrl || info.srcUrl;

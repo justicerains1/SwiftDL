@@ -139,6 +139,7 @@ fn ftp_fail(e: suppaftp::FtpError) -> Fail {
         Some(421) => Fail::Throttle(trf!("FTP 服务器连接数已满 ({})", s)),
         Some(530) => Fail::Fatal(tr!("FTP 登录失败：用户名或密码错误").into()),
         Some(550) => Fail::Fatal(trf!("文件不存在或无权访问 ({})", s)),
+        _ if super::sys::is_cert_error(&s) => Fail::Fatal(super::probe::cert_hint(s)),
         _ => Fail::Net(s),
     }
 }
@@ -148,7 +149,12 @@ async fn ftp_connect(u: &url::Url, c: &Creds) -> Result<Ftp, Fail> {
     let port = u.port().unwrap_or(21);
     let mut conn = if u.scheme() == "ftps" {
         let s = ImplAsyncFtpStream::connect((host, port)).await.map_err(ftp_fail)?;
-        let tls = AsyncNativeTlsConnector::from(async_native_tls::TlsConnector::new());
+        let trusted = super::is_trusted_host(host);
+        let tls = AsyncNativeTlsConnector::from(
+            async_native_tls::TlsConnector::new()
+                .danger_accept_invalid_certs(trusted)
+                .danger_accept_invalid_hostnames(trusted),
+        );
         Ftp::Tls(s.into_secure(tls, host).await.map_err(ftp_fail)?)
     } else {
         Ftp::Plain(AsyncFtpStream::connect((host, port)).await.map_err(ftp_fail)?)

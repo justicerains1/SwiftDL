@@ -778,3 +778,42 @@ fn sqlite_migration() {
     assert_eq!(store::load_tasks().len(), 2);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// 证书不可信：默认拒绝并给出可识别的错误；信任站点后可以下载。需联网，`cargo test -- --ignored untrusted_cert`
+#[test]
+#[ignore]
+fn untrusted_cert() {
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let root = std::env::temp_dir().join(format!("swiftdl-test-cert-{}", std::process::id()));
+    unsafe { std::env::set_var("APPDATA", root.join("appdata")) };
+    let m = Manager::new(rt.handle().clone(), Settings { dir: root.clone(), proxy: "direct".into(), ..Default::default() });
+    // 外网可能较慢：网络类错误（超时等）重试几次
+    let probe_retry = |url: &str| {
+        let req = AddReq { url: url.into(), ..Default::default() };
+        let mut r = Err(String::new());
+        for _ in 0..4 {
+            r = rt.block_on(probe::probe(&m.client_for(url), &req));
+            if !matches!(&r, Err(e) if sys::is_network_error(e)) {
+                break;
+            }
+        }
+        r
+    };
+    for url in ["https://self-signed.badssl.com/", "https://expired.badssl.com/", "https://wrong.host.badssl.com/"] {
+        let e = probe_retry(url).unwrap_err();
+        assert!(sys::is_cert_error(&e) && !sys::is_network_error(&e), "{url}: {e}");
+        assert!(e.starts_with(&trf!("服务器证书不可信（自签名、已过期或与域名不符），可信任此站点后重试：{}", "")), "{e}");
+
+        assert_eq!(m.trust_host(url).as_deref(), host_key(url).as_deref());
+        assert!(is_trusted_url(url));
+        let info = probe_retry(url).unwrap();
+        assert!(!info.filename.is_empty());
+        // 严格客户端不受影响（自动更新等仍校验证书）
+        assert!(rt.block_on(async { m.client().get(url).send().await }).is_err());
+    }
+    assert_eq!(store::load_settings().trusted_hosts.len(), 3, "信任列表应保存到设置");
+    let s = Settings { trusted_hosts: vec![], ..m.settings.read().unwrap().clone() };
+    m.apply_settings(s);
+    assert!(!is_trusted_url("https://self-signed.badssl.com/"), "取消信任后恢复校验");
+    let _ = std::fs::remove_dir_all(&root);
+}

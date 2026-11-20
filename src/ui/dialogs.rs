@@ -257,7 +257,7 @@ impl AddDialog {
             self.variant = 0;
             if !url.is_empty() {
                 let slot = self.probe.clone();
-                let client = m.client();
+                let client = m.client_for(&eff);
                 let mut req = self.extra.clone();
                 req.url = eff;
                 req.key_path = Some(self.key.clone()).filter(|k| !k.trim().is_empty());
@@ -393,6 +393,15 @@ info hash: {}", b.name, b.info_hash));
                                             ui.label(RichText::new(t).size(12.5).color(c));
                                         }
                                         Some(Err(e)) => {
+                                            if crate::engine::sys::is_cert_error(e)
+                                                && let Some(h) = crate::engine::host_key(&self.probed_url)
+                                                && button(ui, Btn::Secondary, Some(Icon::Alert), tr!("信任此站点"))
+                                                    .on_hover_text(trf!("今后忽略 {} 的证书错误。仅在确认该站点可信（如内网、自签名证书）时使用", h))
+                                                    .clicked()
+                                            {
+                                                m.trust_host(&self.probed_url);
+                                                self.probed_key.clear(); // 重新探测
+                                            }
                                             ui.add(
                                                 egui::Label::new(
                                                     RichText::new(trf!("获取失败：{}", e)).size(12.5).color(p.danger),
@@ -696,6 +705,28 @@ impl SettingsDialog {
                         );
                     });
                     hint(ui, p, tr!("留空使用系统代理，填 direct 直连，支持 http:// 与 socks5://"));
+                    row(ui, p, tr!("信任的站点"), |ui| {
+                        if s.trusted_hosts.is_empty() {
+                            hint(ui, p, tr!("无"));
+                        } else {
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                let mut remove = None;
+                                for (i, h) in s.trusted_hosts.iter().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new(h).color(p.text));
+                                        if icon_button(ui, Icon::X, tr!("取消信任"), true).clicked() {
+                                            remove = Some(i);
+                                        }
+                                    });
+                                }
+                                if let Some(i) = remove {
+                                    s.trusted_hosts.remove(i);
+                                }
+                            });
+                        }
+                    });
+                    hint(ui, p, tr!("这些站点的 HTTPS / FTPS 证书错误会被忽略；下载遇到证书不可信时可一键添加"));
                 });
                 section(ui, p, tr!("托盘与启动"), |ui| {
                     row(ui, p, tr!("关闭窗口"), |ui| {

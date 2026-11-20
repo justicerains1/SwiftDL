@@ -655,6 +655,15 @@ impl App {
             self.selected().into_iter().for_each(|id| self.m.start(id));
             ui.close();
         }
+        if st == Status::Error
+            && r.error.as_deref().is_some_and(crate::engine::sys::is_cert_error)
+            && !crate::engine::is_trusted_url(&t.url())
+            && menu_item(ui, Icon::Refresh, tr!("信任此站点并重试"), false).clicked()
+        {
+            self.m.trust_host(&t.url());
+            self.m.start(t.id);
+            ui.close();
+        }
         if matches!(st, Status::Running | Status::Queued) && menu_item(ui, Icon::Pause, tr!("暂停"), false).clicked() {
             self.selected().into_iter().for_each(|id| self.m.pause(id));
             ui.close();
@@ -863,7 +872,18 @@ impl App {
                 ui.horizontal(|ui| {
                     let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
                     icons::paint(ui.painter(), r, Icon::Alert, p.danger);
-                    ui.add(egui::Label::new(RichText::new(e).size(13.0).color(p.danger)).truncate());
+                    if st == Status::Error
+                        && crate::engine::sys::is_cert_error(&e)
+                        && !crate::engine::is_trusted_url(&url)
+                        && let Some(h) = crate::engine::host_key(&url)
+                        && button(ui, Btn::Secondary, Some(Icon::Refresh), tr!("信任此站点并重试"))
+                            .on_hover_text(trf!("今后忽略 {} 的证书错误。仅在确认该站点可信（如内网、自签名证书）时使用", h))
+                            .clicked()
+                    {
+                        self.m.trust_host(&url);
+                        self.m.start(t.id);
+                    }
+                    ui.add(egui::Label::new(RichText::new(&e).size(13.0).color(p.danger)).truncate()).on_hover_text(&e);
                 });
             });
         }

@@ -142,7 +142,31 @@ pub fn woke_from_sleep(gap_secs: u64) -> bool {
 }
 
 /// 错误分类：网络类错误在网络恢复后自动重试，且不消耗自动重试次数
+/// 证书校验失败（不受信任的根、自签名、过期、域名不符、吊销等）。
+/// schannel 的错误文字随系统语言变化，故按 “os error <HRESULT>” 中的错误码判断。
+pub fn is_cert_error(e: &str) -> bool {
+    const CODES: [u32; 6] = [
+        0x8009_0322, // SEC_E_WRONG_PRINCIPAL
+        0x8009_0325, // SEC_E_UNTRUSTED_ROOT
+        0x8009_0327, // SEC_E_CERT_UNKNOWN
+        0x8009_0328, // SEC_E_CERT_EXPIRED
+        0x8009_0349, // SEC_E_CERT_WRONG_USAGE
+        0x8009_6004, // TRUST_E_CERT_SIGNATURE
+    ];
+    e.match_indices("os error ").any(|(i, k)| {
+        let rest = &e[i + k.len()..];
+        let end = rest.find(|c: char| c != '-' && !c.is_ascii_digit()).unwrap_or(rest.len());
+        let Ok(n) = rest[..end].parse::<i64>() else { return false };
+        let c = n as u32;
+        // CERT_E_*（0x800B01xx）、CRYPT_E_* 吊销检查（0x800920xx）、TRUST_E_* 证书链（0x800960xx）
+        c & 0xFFFF_FF00 == 0x800B_0100 || c & 0xFFFF_FF00 == 0x8009_2000 || c & 0xFFFF_FF00 == 0x8009_6000 || CODES.contains(&c)
+    })
+}
+
 pub fn is_network_error(e: &str) -> bool {
+    if is_cert_error(e) {
+        return false; // 证书问题重试无意义，需用户决定是否信任
+    }
     let l = e.to_ascii_lowercase();
     [
         "error sending request",
@@ -194,6 +218,12 @@ mod tests {
         assert!(is_network_error("连接停滞，正在重连"));
         assert!(!is_network_error("HTTP 404"));
         assert!(!is_network_error("磁盘空间不足"));
+        let cert = "error sending request for url (https://a.com/): client error (Connect): 证书链由不受信任的颁发机构颁发。 (os error -2146762487)";
+        assert!(is_cert_error(cert) && !is_network_error(cert));
+        assert!(is_cert_error("The certificate has expired (os error -2146762495)"));
+        assert!(is_cert_error("SEC_E_WRONG_PRINCIPAL (os error -2146893022)"));
+        assert!(!is_cert_error("tcp connect error: (os error 10060)"));
+        assert!(!is_cert_error("HTTP 404"));
         assert!(woke_from_sleep(60) && !woke_from_sleep(1));
         let _ = std::fs::remove_dir_all(&tmp);
     }

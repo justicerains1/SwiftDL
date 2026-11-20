@@ -121,6 +121,8 @@ pub struct Settings {
     pub bt_seed: bool,
     /// BT 上传限速 KB/s，0 为不限
     pub bt_upload_kb: u64,
+    /// 用户选择信任的站点（小写主机名）：忽略其 HTTPS / FTPS 证书错误
+    pub trusted_hosts: Vec<String>,
 }
 
 impl Default for Settings {
@@ -163,6 +165,7 @@ impl Default for Settings {
             bt_dht: true,
             bt_seed: false,
             bt_upload_kb: 0,
+            trusted_hosts: Vec::new(),
         }
     }
 }
@@ -399,6 +402,8 @@ pub struct Manager {
     pub settings: RwLock<Settings>,
     pub limiter: Limiter,
     client: RwLock<reqwest::Client>,
+    /// 不校验证书的客户端，只用于用户信任的站点
+    insecure: RwLock<reqwest::Client>,
     next_id: AtomicU64,
     dirty: AtomicBool,
     last_saved: Mutex<Vec<u8>>,
@@ -415,8 +420,34 @@ pub fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-pub fn build_client(proxy: &str) -> reqwest::Client {
+/// 用户信任的站点（与设置同步），FTPS 等拿不到 Manager 的地方也要用
+static TRUSTED_HOSTS: RwLock<Vec<String>> = RwLock::new(Vec::new());
+
+fn set_trusted_hosts(hosts: &[String]) {
+    *TRUSTED_HOSTS.write().unwrap() = hosts.to_vec();
+}
+
+/// 规范化主机名（小写、去掉 IPv6 方括号）
+pub fn host_key(url: &str) -> Option<String> {
+    let u = url::Url::parse(url.trim()).ok()?;
+    let h = u.host_str()?.trim_matches(['[', ']']).to_ascii_lowercase();
+    (!h.is_empty()).then_some(h)
+}
+
+pub fn is_trusted_host(host: &str) -> bool {
+    let h = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    TRUSTED_HOSTS.read().unwrap().iter().any(|t| *t == h)
+}
+
+pub fn is_trusted_url(url: &str) -> bool {
+    host_key(url).is_some_and(|h| is_trusted_host(&h))
+}
+
+/// `insecure` 为 true 时不校验证书（只用于用户明确信任的站点）
+pub fn build_client(proxy: &str, insecure: bool) -> reqwest::Client {
     let mut b = reqwest::Client::builder()
+        .tls_danger_accept_invalid_certs(insecure)
+        .tls_danger_accept_invalid_hostnames(insecure)
         // 多条独立 TCP 连接才能叠加带宽，故强制 HTTP/1.1
         .http1_only()
         .tcp_nodelay(true)
@@ -467,10 +498,12 @@ impl Manager {
         };
         let tasks: Vec<Arc<Task>> = recs.into_iter().map(Task::from_rec).collect();
         let next = tasks.iter().map(|t| t.id).max().unwrap_or(0) + 1;
+        set_trusted_hosts(&settings.trusted_hosts);
         Arc::new(Self {
             tasks: RwLock::new(tasks),
             limiter: Limiter::new(settings.speed_limit_kb * 1024),
-            client: RwLock::new(build_client(&settings.proxy)),
+            client: RwLock::new(build_client(&settings.proxy, false)),
+            insecure: RwLock::new(build_client(&settings.proxy, true)),
             settings: RwLock::new(settings),
             next_id: AtomicU64::new(next),
             dirty: AtomicBool::new(false),
@@ -483,8 +516,25 @@ impl Manager {
         })
     }
 
+    /// 严格校验证书的客户端（自动更新等始终用它）
     pub fn client(&self) -> reqwest::Client {
         self.client.read().unwrap().clone()
+    }
+
+    /// 下载用客户端：用户信任的站点忽略证书错误，其余严格校验
+    pub fn client_for(&self, url: &str) -> reqwest::Client {
+        if is_trusted_url(url) { self.insecure.read().unwrap().clone() } else { self.client() }
+    }
+
+    /// 信任链接所在站点（忽略其证书错误）并保存设置；返回主机名
+    pub fn trust_host(self: &Arc<Self>, url: &str) -> Option<String> {
+        let h = host_key(url)?;
+        let mut s = self.settings.read().unwrap().clone();
+        if !s.trusted_hosts.contains(&h) {
+            s.trusted_hosts.push(h.clone());
+            self.apply_settings(s);
+        }
+        Some(h)
     }
 
     pub fn repaint(&self) {
@@ -509,7 +559,11 @@ impl Manager {
     pub fn apply_settings(self: &Arc<Self>, s: Settings) {
         let old = self.settings.read().unwrap().clone();
         if old.proxy != s.proxy {
-            *self.client.write().unwrap() = build_client(&s.proxy);
+            *self.client.write().unwrap() = build_client(&s.proxy, false);
+            *self.insecure.write().unwrap() = build_client(&s.proxy, true);
+        }
+        if old.trusted_hosts != s.trusted_hosts {
+            set_trusted_hosts(&s.trusted_hosts);
         }
         let bt_limits = old.speed_limit_kb != s.speed_limit_kb || old.bt_upload_kb != s.bt_upload_kb;
         if old.speed_limit_kb != s.speed_limit_kb {

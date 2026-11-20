@@ -330,4 +330,21 @@ pub static EN: &[(&str, &str)] = &[
     ("BT 任务  {} 个文件", "BT task  {} files"),
     ("节点", "Peers"),
     ("{} 个    已上传 {}", "{}    uploaded {}"),
+    (
+        "服务器证书不可信（自签名、已过期或与域名不符），可信任此站点后重试：{}",
+        "Untrusted server certificate (self-signed, expired or name mismatch). Trust this site to retry: {}",
+    ),
+    ("信任此站点", "Trust this site"),
+    ("信任此站点并重试", "Trust this site and retry"),
+    (
+        "今后忽略 {} 的证书错误。仅在确认该站点可信（如内网、自签名证书）时使用",
+        "Certificate errors from {} will be ignored from now on. Only do this for sites you trust (e.g. intranet, self-signed).",
+    ),
+    ("信任的站点", "Trusted sites"),
+    ("无", "None"),
+    ("取消信任", "Remove"),
+    (
+        "这些站点的 HTTPS / FTPS 证书错误会被忽略；下载遇到证书不可信时可一键添加",
+        "Certificate errors from these sites are ignored for HTTPS / FTPS. Sites can be added when a download hits an untrusted certificate.",
+    ),
 ];

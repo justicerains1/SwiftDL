@@ -52,8 +52,8 @@ pub async fn run(m: Arc<Manager>, t: Arc<Task>) {
                 if e.starts_with(tr!("磁盘空间不足")) {
                     meta.retries = u32::MAX; // 本地问题，重试无意义
                 }
-                if e.starts_with("SHA-256") {
-                    meta.retries = u32::MAX; // 校验失败不自动重试
+                if e.starts_with("SHA-256") || super::sys::is_cert_error(&e) {
+                    meta.retries = u32::MAX; // 校验失败、证书不可信时不自动重试
                 }
                 meta.error = Some(e);
                 meta.error_at = now();
@@ -112,12 +112,14 @@ struct FErr {
 
 impl FErr {
     fn net(msg: String) -> Self {
-        Self { msg, throttle: false, fatal: false }
+        // 证书错误换连接重试也不会好
+        let fatal = super::sys::is_cert_error(&msg);
+        Self { msg, throttle: false, fatal }
     }
 }
 
 async fn run_inner(m: &Arc<Manager>, t: &Arc<Task>, tok: &CancellationToken) -> Result<(), String> {
-    let client = m.client();
+    let client = m.client_for(&t.url());
     if super::bt::is_bt(&t.url()) {
         return super::bt::run(m, t, tok, client).await;
     }

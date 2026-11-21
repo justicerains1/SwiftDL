@@ -66,7 +66,19 @@ jobs:
         run: cargo build --release --locked
 
       - name: Tests
-        run: cargo test --release --locked -- --test-threads=1
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --release --locked -- --test-threads=1 2>&1 | tee test.log
+
+      # 失败详情写成注解，便于在 Actions 页面和 API 中直接查看
+      - name: Report test failures
+        if: failure()
+        shell: bash
+        run: |
+          [ -f test.log ] || exit 0
+          msg=$(grep -E "^test .* FAILED|panicked at|^---- |assertion|left:|right:" -A2 test.log | head -60 | sed -e 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')
+          echo "::error title=Test failures::$msg"
 
       - name: Package
         run: python -I packaging/package.py

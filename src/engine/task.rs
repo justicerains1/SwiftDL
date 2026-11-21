@@ -28,6 +28,9 @@ pub static STALL_MS: AtomicU64 = AtomicU64::new(15_000);
 
 pub async fn run(m: Arc<Manager>, t: Arc<Task>) {
     let tok = t.cancel.lock().unwrap().clone();
+    let started = std::time::Instant::now();
+    let from = t.downloaded.load(Relaxed);
+    log_info!("task {} start: {} (conns {}, retries {})", t.id, t.url(), t.conns, t.meta.lock().unwrap().retries);
     let mut r = run_inner(&m, &t, &tok).await;
     t.active_conns.store(0, Relaxed);
     if r.is_ok() {
@@ -35,6 +38,13 @@ pub async fn run(m: Arc<Manager>, t: Arc<Task>) {
     }
     {
         let mut meta = t.meta.lock().unwrap();
+        let secs = started.elapsed().as_secs_f64();
+        let got = t.downloaded.load(Relaxed).saturating_sub(from);
+        match &r {
+            Ok(()) => log_info!("task {} done: {} bytes this run in {secs:.1}s ({:.0} KB/s)", t.id, got, got as f64 / 1024.0 / secs.max(0.001)),
+            Err(_) if tok.is_cancelled() => log_info!("task {} stopped after {secs:.1}s ({} bytes)", t.id, got),
+            Err(e) => log_warn!("task {} failed after {secs:.1}s ({} bytes): {e}", t.id, got),
+        }
         match r {
             Ok(()) => {
                 meta.error = None;
@@ -128,6 +138,14 @@ async fn run_inner(m: &Arc<Manager>, t: &Arc<Task>, tok: &CancellationToken) -> 
         r = probe::probe(&client, &req) => r?,
         _ = tok.cancelled() => return Err(CANCELLED.into()),
     };
+    log_info!(
+        "task {} probe: size {:?}, resumable {}, hls {}, trusted {}",
+        t.id,
+        info.size,
+        info.resumable,
+        info.hls.is_some(),
+        super::is_trusted_url(&req.url)
+    );
 
     // 决定是全新下载还是续传
     // 首次运行：确定文件名与（按类型分类后的）目录
@@ -246,7 +264,9 @@ async fn run_inner(m: &Arc<Manager>, t: &Arc<Task>, tok: &CancellationToken) -> 
                 Some(Ok((End::Done | End::Yield, _))) => top_up(&mut set),
                 Some(Ok((End::Fail(e), seg))) => {
                     // 只释放该分段，由其他连接接手；同一分段反复失败才判定任务出错
-                    if seg.fail_rounds.fetch_add(1, Relaxed) + 1 >= MAX_SEG_ROUNDS {
+                    let rounds = seg.fail_rounds.fetch_add(1, Relaxed) + 1;
+                    log_warn!("task {} segment failed ({rounds}/{MAX_SEG_ROUNDS}): {e}", t.id);
+                    if rounds >= MAX_SEG_ROUNDS {
                         failure.get_or_insert(e);
                         wtok.cancel();
                     } else {
@@ -441,7 +461,9 @@ async fn worker(c: &Ctx, seg: &Seg) -> End {
         if err.throttle {
             // 服务器限流：降低该任务的并发，多余的连接主动退出
             c.t.throttled_at.store(now(), Relaxed);
-            let _ = c.t.conn_limit.try_update(Relaxed, Relaxed, |l| Some(l.saturating_sub(1).max(1)));
+            if let Ok(old) = c.t.conn_limit.try_update(Relaxed, Relaxed, |l| Some(l.saturating_sub(1).max(1))) {
+                log_info!("task {} throttled by server ({}), connections {} -> {}", c.t.id, err.msg, old, old.saturating_sub(1).max(1));
+            }
             if c.workers.load(Relaxed) > c.t.conn_limit.load(Relaxed) {
                 return End::Yield;
             }

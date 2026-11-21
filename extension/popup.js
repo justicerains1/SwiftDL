@@ -20,10 +20,18 @@ async function checkConn() {
   const { port, token } = await chrome.runtime.sendMessage({ type: "pairing" });
   $("token").value = token || "";
   try {
-    const r = await fetch(`http://127.0.0.1:${port}/hello`, { method: "POST", headers: { "X-SwiftDL-Token": token || "" } });
+    const ver = chrome.runtime.getManifest().version;
+    const r = await fetch(`http://127.0.0.1:${port}/hello`, {
+      method: "POST",
+      headers: { "X-SwiftDL-Token": token || "", "X-SwiftDL-Ext-Version": ver },
+    });
     $("st").textContent = t(r.ok ? "statusConnected" : r.status === 403 ? "statusUnpaired" : "statusNotRunning");
     $("st").className = r.ok ? "on" : "";
     $("pair").hidden = r.status !== 403;
+    // 自动重新加载后仍不一致：多半是从其他文件夹加载的扩展，提示用户处理
+    const app = r.ok ? (await r.json().catch(() => ({}))).app : "";
+    $("ver").hidden = !app || app === ver;
+    $("ver").textContent = `${t("versionMismatch")} (${ver} / SwiftDL ${app})`;
   } catch (_) {
     $("st").textContent = t("statusAppNotRunning");
     $("pair").hidden = true;

@@ -11,6 +11,9 @@
   "statusConnected": {
     "message": "已连接"
   },
+  "versionMismatch": {
+    "message": "扩展与 SwiftDL 版本不一致：请在扩展页点击“重新加载”，或通过 SwiftDL 设置中的安装向导重新安装"
+  },
   "statusUnpaired": {
     "message": "未配对"
   },

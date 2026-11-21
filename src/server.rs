@@ -64,14 +64,24 @@ async fn show(State(s): State<St>, h: HeaderMap) -> StatusCode {
     StatusCode::OK
 }
 
-/// 扩展启动/安装时报到，用于确认扩展已连接
-async fn hello(State(s): State<St>, h: HeaderMap) -> StatusCode {
+pub const EXT_VERSION_HEADER: &str = "x-swiftdl-ext-version";
+
+/// 扩展启动/安装时报到，用于确认扩展已连接；双方交换版本号，扩展据此在程序升级后重新加载自身
+async fn hello(State(s): State<St>, h: HeaderMap) -> axum::response::Response {
+    use axum::response::IntoResponse;
     if !allowed(&s, &h) {
-        return StatusCode::FORBIDDEN;
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if let Some(v) = h.get(EXT_VERSION_HEADER).and_then(|v| v.to_str().ok()) {
+        let v: String = v.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '.').take(32).collect();
+        if *crate::browser::EXT_VERSION.lock().unwrap() != v {
+            log_info!("browser extension v{v} connected (app v{})", env!("CARGO_PKG_VERSION"));
+        }
+        *crate::browser::EXT_VERSION.lock().unwrap() = v;
     }
     crate::browser::LAST_HELLO.store(crate::engine::now(), std::sync::atomic::Ordering::Relaxed);
     s.m.repaint();
-    StatusCode::OK
+    Json(serde_json::json!({ "app": env!("CARGO_PKG_VERSION") })).into_response()
 }
 
 /// 已有实例在运行：把参数转交给它。返回 true 表示已转交。
@@ -129,6 +139,22 @@ mod tests {
         assert_eq!(post("/hello", None, Some("chrome-extension://abc")), 403);
         assert_eq!(post("/hello", Some(&token), Some("chrome-extension://abc")), 200);
         assert_eq!(rx.try_iter().filter(|e| matches!(e, UiEvent::Add(_))).count(), 2);
+
+        // 握手交换版本：程序返回自身版本，记录扩展版本；不带版本头（弹窗查询）时不覆盖
+        let hello = |ver: Option<&str>| {
+            let mut rb = c.post(format!("{base}/hello")).header(TOKEN_HEADER, &token).header("origin", "chrome-extension://abc");
+            if let Some(v) = ver {
+                rb = rb.header(EXT_VERSION_HEADER, v);
+            }
+            rt.block_on(async { rb.send().await.unwrap().json::<serde_json::Value>().await.unwrap() })
+        };
+        assert_eq!(hello(Some("0.4.0<script>"))["app"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(*crate::browser::EXT_VERSION.lock().unwrap(), "0.4.0script", "只保留安全字符");
+        assert_eq!(crate::browser::ext_outdated().as_deref(), Some("0.4.0script"));
+        hello(None);
+        assert_eq!(*crate::browser::EXT_VERSION.lock().unwrap(), "0.4.0script");
+        hello(Some(env!("CARGO_PKG_VERSION")));
+        assert_eq!(crate::browser::ext_outdated(), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

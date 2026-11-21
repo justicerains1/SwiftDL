@@ -89,7 +89,7 @@ pub fn err_str(e: reqwest::Error) -> String {
 
 /// 证书错误加上易懂的说明（保留原文，其中的错误码用于识别）
 pub fn cert_hint(s: String) -> String {
-    if super::sys::is_cert_error(&s) {
+    if super::sys::is_cert_code_error(&s) {
         trf!("服务器证书不可信（自签名、已过期或与域名不符），可信任此站点后重试：{}", s)
     } else {
         s

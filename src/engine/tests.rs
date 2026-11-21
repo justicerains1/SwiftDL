@@ -131,6 +131,14 @@ async fn stall(h: HeaderMap) -> Response<Body> {
 async fn gone() -> Response<Body> {
     status(403)
 }
+/// 跳转到另一个 HTTPS 站点（不会真正连接：重定向策略应先拦下）
+async fn to_https() -> Response<Body> {
+    Response::builder().status(302).header("location", "https://cdn.untrusted.invalid/a.zip").body(Body::empty()).unwrap()
+}
+/// 同站点内跳转
+async fn to_file() -> Response<Body> {
+    Response::builder().status(302).header("location", "/file").body(Body::empty()).unwrap()
+}
 async fn norange() -> Response<Body> {
     Response::builder().header("content-length", SIZE).body(slow_body(0, SIZE, BASE)).unwrap()
 }
@@ -240,6 +248,8 @@ fn env(name: &str) -> Env {
         .route("/limited", get(limited))
         .route("/stall", get(stall))
         .route("/gone", get(gone))
+        .route("/to-https", get(to_https))
+        .route("/to-file", get(to_file))
         .route("/norange", get(norange))
         .route("/chunked", get(chunked))
         .route("/hls/master.m3u8", get(hls_master))
@@ -804,7 +814,9 @@ fn untrusted_cert() {
         assert!(sys::is_cert_error(&e) && !sys::is_network_error(&e), "{url}: {e}");
         assert!(e.starts_with(&trf!("服务器证书不可信（自签名、已过期或与域名不符），可信任此站点后重试：{}", "")), "{e}");
 
-        assert_eq!(m.trust_host(url).as_deref(), host_key(url).as_deref());
+        let h = sys::trust_target(&e, url).unwrap();
+        assert_eq!(Some(&h), host_key(url).as_ref());
+        m.trust_host(&h);
         assert!(is_trusted_url(url));
         let info = probe_retry(url).unwrap();
         assert!(!info.filename.is_empty());
@@ -816,4 +828,38 @@ fn untrusted_cert() {
     m.apply_settings(s);
     assert!(!is_trusted_url("https://self-signed.badssl.com/"), "取消信任后恢复校验");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 信任站点使用不校验证书的客户端：只能跳转到同样被信任的站点，跳到其他 HTTPS 站点时停止并指出目标主机
+#[test]
+fn trusted_redirect_policy() {
+    let e = env("redirect");
+    let m = Manager::new(e.rt.handle().clone(), settings(&e));
+    let base_host = host_key(&e.base).unwrap();
+    m.trust_host(&base_host);
+    let probe_url = |path: &str| {
+        let url = format!("{}{path}", e.base);
+        let req = AddReq { url: url.clone(), ..Default::default() };
+        e.rt.block_on(probe::probe(&m.client_for(&url), &req))
+    };
+
+    // 同站点跳转照常
+    assert_eq!(probe_url("/to-file").unwrap().size, Some(SIZE as u64));
+
+    // 跳到未信任的 HTTPS 站点：不连接、不自动重试，信任按钮指向跳转目标
+    let err = probe_url("/to-https").unwrap_err();
+    assert_eq!(sys::redirect_host(&err), Some("cdn.untrusted.invalid"), "{err}");
+    assert!(sys::is_cert_error(&err) && !sys::is_network_error(&err));
+    assert_eq!(sys::trust_target(&err, &format!("{}/to-https", e.base)).as_deref(), Some("cdn.untrusted.invalid"));
+
+    // 信任目标后放行（目标不存在，所以变成 DNS 等网络错误，而不是重定向错误）
+    m.trust_host("cdn.untrusted.invalid");
+    let err = probe_url("/to-https").unwrap_err();
+    assert!(sys::redirect_host(&err).is_none(), "{err}");
+
+    // 未信任的站点用严格客户端，跳转不受此策略限制（目标证书照常校验）
+    let s = Settings { trusted_hosts: vec![], ..m.settings.read().unwrap().clone() };
+    m.apply_settings(s);
+    let err = probe_url("/to-https").unwrap_err();
+    assert!(sys::redirect_host(&err).is_none(), "{err}");
 }

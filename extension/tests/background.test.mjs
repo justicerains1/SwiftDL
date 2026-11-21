@@ -1,6 +1,12 @@
 // 在 node 中用模拟的 chrome API 运行 background.js，验证嗅探 → 列表 → 发送到 SwiftDL 的完整流程
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+
+const VERSION = JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url))).version;
+let appVersion = VERSION;
+let reloads = 0;
+const hellos = [];
 
 const listeners = {};
 const on = (name) => ({ addListener: (f) => (listeners[name] = f) });
@@ -24,7 +30,14 @@ globalThis.chrome = {
   action: { setBadgeText: async ({ tabId, text }) => (badges[tabId] = text), setBadgeBackgroundColor: async () => {} },
   tabs: { get: async (id) => tabs[id] ?? Promise.reject(new Error("no tab")), onUpdated: on("tabUpdated"), onRemoved: on("tabRemoved") },
   webRequest: { onHeadersReceived: on("headers") },
-  runtime: { onMessage: on("message"), onInstalled: on("installed"), onStartup: on("startup"), getURL: (p) => `chrome-extension://abc/${p}` },
+  runtime: {
+    onMessage: on("message"),
+    onInstalled: on("installed"),
+    onStartup: on("startup"),
+    getURL: (p) => `chrome-extension://abc/${p}`,
+    getManifest: () => ({ version: VERSION }),
+    reload: () => reloads++,
+  },
   downloads: { onCreated: on("dlCreated") },
   contextMenus: { create() {}, onClicked: on("menu") },
   cookies: { getAll: async () => [{ name: "sid", value: "abc" }] },
@@ -36,6 +49,10 @@ globalThis.fetch = async (url, opt = {}) => {
   }
   if (url === "chrome-extension://abc/config.json") {
     return new Response(JSON.stringify({ token: "tok-123", port: 52080 }));
+  }
+  if (url === "http://127.0.0.1:52080/hello") {
+    hellos.push(opt.headers);
+    return new Response(JSON.stringify({ app: appVersion }), { status: 200 });
   }
   if (url.startsWith("http://127.0.0.1:52080/add")) {
     const tok = opt.headers["X-SwiftDL-Token"];
@@ -104,6 +121,32 @@ test("页面跳转清空，关闭标签删除记录", async () => {
   assert.equal((await msg({ type: "list", tabId: 7 })).length, 1);
   listeners.tabRemoved(7);
   assert.equal("tab:7" in session, false);
+});
+
+test("后台启动即报到并附带版本；版本一致不重新加载", async () => {
+  await settle();
+  assert.ok(hellos.length >= 1, "service worker 启动时应报到");
+  assert.equal(hellos[0]["X-SwiftDL-Ext-Version"], VERSION);
+  assert.equal(hellos[0]["X-SwiftDL-Token"], "tok-123");
+  assert.equal(reloads, 0);
+});
+
+test("程序升级后自动重新加载扩展，每个程序版本只重载一次", async () => {
+  const { syncVersion } = await import("../background.js");
+  assert.equal(await syncVersion(undefined), false, "旧版程序不返回版本");
+  assert.equal(await syncVersion(VERSION), false);
+  assert.equal(await syncVersion("99.0.0"), true);
+  assert.equal(reloads, 1);
+  assert.equal(await syncVersion("99.0.0"), false, "重载后仍不一致（从其他文件夹加载）时不再反复重载");
+  assert.equal(await syncVersion("99.1.0"), true, "程序再次升级时可以再重载一次");
+  assert.equal(reloads, 2);
+
+  // 握手路径：程序返回新版本 → 重新加载
+  appVersion = "99.2.0";
+  listeners.startup();
+  await settle();
+  assert.equal(reloads, 3);
+  appVersion = VERSION;
 });
 
 test("SwiftDL 未运行时下载返回失败", async () => {

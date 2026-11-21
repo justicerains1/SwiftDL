@@ -3,6 +3,8 @@
 #[macro_use]
 mod i18n;
 mod i18n_en;
+#[macro_use]
+mod diag;
 
 mod browser;
 mod clipboard;
@@ -18,6 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 fn main() {
+    diag::init();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
@@ -68,6 +71,12 @@ fn main() {
         }
     };
 
+    log_info!(
+        "SwiftDL v{} started (minimized={minimized}, updated={updated}, server={}, urls={})",
+        env!("CARGO_PKG_VERSION"),
+        listener.is_some(),
+        urls.len()
+    );
     let (tx, rx) = std::sync::mpsc::channel();
     let m = Manager::new(rt.handle().clone(), settings);
     {
@@ -97,8 +106,10 @@ fn main() {
             let gap = wall.duration_since(last_wall).map(|d| d.as_secs()).unwrap_or(0);
             last_wall = wall;
             if engine::sys::woke_from_sleep(gap) {
+                log_info!("woke from sleep after {gap}s, reconnecting");
                 bg.on_wake();
             } else if engine::sys::NET_RESTORED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                log_info!("network restored, retrying network errors");
                 bg.on_network_restored();
             }
             let running = bg.tick();
@@ -130,6 +141,7 @@ fn main() {
     };
     if let Err(e) = eframe::run_native("SwiftDL", opts, Box::new(move |cc| Ok(Box::new(ui::App::new(cc, app_m, rx, ui_tx, minimized))))) {
         eprintln!("界面启动失败: {e}");
+        log_error!("UI failed to start: {e}");
         rfd::MessageDialog::new()
             .set_level(rfd::MessageLevel::Error)
             .set_title("SwiftDL")
@@ -155,4 +167,5 @@ fn main() {
         t.set_status(engine::Status::Queued);
     }
     m.save();
+    log_info!("exit ({} running task(s) will resume next start)", running.len());
 }

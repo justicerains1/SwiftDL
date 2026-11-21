@@ -22,6 +22,25 @@ pub fn connected() -> bool {
     LAST_HELLO.load(Ordering::Relaxed) != 0
 }
 
+/// 已连接扩展报告的版本（v0.6 之前的扩展不报告，为空）
+pub static EXT_VERSION: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// 已连接的扩展与程序版本不一致时返回扩展版本（“旧版本”表示未报告版本的旧扩展）。
+/// 扩展发现不一致会自动重新加载一次；仍不一致通常是从其他文件夹加载的，需要用户手动处理。
+pub fn ext_outdated() -> Option<String> {
+    if !connected() {
+        return None;
+    }
+    let v = EXT_VERSION.lock().unwrap().clone();
+    if v == env!("CARGO_PKG_VERSION") {
+        None
+    } else if v.is_empty() {
+        Some(tr!("旧版本").into())
+    } else {
+        Some(v)
+    }
+}
+
 pub fn ext_dir() -> PathBuf {
     store::data_dir().join("extension")
 }
@@ -95,4 +114,14 @@ pub fn launch(exe: &PathBuf, b: Browser, token: &str, port: u16) -> std::io::Res
     arg.push(&dir);
     let _ = std::process::Command::new("explorer").arg(arg).spawn();
     Ok(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    /// 内嵌扩展的版本必须与程序版本一致：扩展据此判断程序升级后是否需要重新加载
+    #[test]
+    fn manifest_version_matches_app() {
+        let m: serde_json::Value = serde_json::from_slice(include_bytes!("../extension/manifest.json")).unwrap();
+        assert_eq!(m["version"], env!("CARGO_PKG_VERSION"), "请同步修改 extension/manifest.json 的 version");
+    }
 }

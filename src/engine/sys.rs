@@ -141,10 +141,9 @@ pub fn woke_from_sleep(gap_secs: u64) -> bool {
     gap_secs >= 20
 }
 
-/// 错误分类：网络类错误在网络恢复后自动重试，且不消耗自动重试次数
 /// 证书校验失败（不受信任的根、自签名、过期、域名不符、吊销等）。
 /// schannel 的错误文字随系统语言变化，故按 “os error <HRESULT>” 中的错误码判断。
-pub fn is_cert_error(e: &str) -> bool {
+pub fn is_cert_code_error(e: &str) -> bool {
     const CODES: [u32; 6] = [
         0x8009_0322, // SEC_E_WRONG_PRINCIPAL
         0x8009_0325, // SEC_E_UNTRUSTED_ROOT
@@ -163,6 +162,30 @@ pub fn is_cert_error(e: &str) -> bool {
     })
 }
 
+/// 重定向错误中的标记（两种语言的提示都以它结尾，便于识别目标主机）
+pub const REDIRECT_MARK: &str = "(redirect: ";
+
+/// 从“信任站点被重定向到未信任的 HTTPS 站点”的错误中取出目标主机
+pub fn redirect_host(e: &str) -> Option<&str> {
+    let rest = &e[e.rfind(REDIRECT_MARK)? + REDIRECT_MARK.len()..];
+    Some(&rest[..rest.find(')')?]).filter(|h| !h.is_empty())
+}
+
+/// 需要用户决定是否信任站点的错误：证书不可信，或被重定向到未经证书校验的站点。
+/// 这类错误重试无意义，不自动重试。
+pub fn is_cert_error(e: &str) -> bool {
+    is_cert_code_error(e) || redirect_host(e).is_some()
+}
+
+/// 出错后点“信任此站点”应信任的主机：重定向错误取跳转目标，证书错误取链接所在主机
+pub fn trust_target(e: &str, url: &str) -> Option<String> {
+    if let Some(h) = redirect_host(e) {
+        return Some(h.to_ascii_lowercase());
+    }
+    if is_cert_code_error(e) { super::host_key(url) } else { None }
+}
+
+/// 错误分类：网络类错误在网络恢复后自动重试，且不消耗自动重试次数
 pub fn is_network_error(e: &str) -> bool {
     if is_cert_error(e) {
         return false; // 证书问题重试无意义，需用户决定是否信任
@@ -224,6 +247,11 @@ mod tests {
         assert!(is_cert_error("SEC_E_WRONG_PRINCIPAL (os error -2146893022)"));
         assert!(!is_cert_error("tcp connect error: (os error 10060)"));
         assert!(!is_cert_error("HTTP 404"));
+        assert_eq!(trust_target(cert, "https://Self.Signed.com/a.zip").as_deref(), Some("self.signed.com"));
+        let redir = "error following redirect for url (https://cdn.x.com/a): 下载被重定向到未信任的站点 (redirect: cdn.x.com)";
+        assert!(is_cert_error(redir) && !is_cert_code_error(redir) && !is_network_error(redir));
+        assert_eq!(trust_target(redir, "https://intranet.local/a").as_deref(), Some("cdn.x.com"));
+        assert_eq!(trust_target("HTTP 404", "https://a.com/"), None);
         assert!(woke_from_sleep(60) && !woke_from_sleep(1));
         let _ = std::fs::remove_dir_all(&tmp);
     }

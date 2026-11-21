@@ -1,6 +1,7 @@
 """打包发布 zip：python -I packaging/package.py
 先执行 cargo build --release。产物：dist/SwiftDL-v<版本>-windows-x64.zip
 """
+import json
 import pathlib
 import re
 import sys
@@ -8,6 +9,9 @@ import zipfile
 
 root = pathlib.Path(__file__).resolve().parent.parent
 version = re.search(r'^version\s*=\s*"([^"]+)"', (root / "Cargo.toml").read_text("utf-8"), re.M).group(1)
+ext_version = json.loads((root / "extension" / "manifest.json").read_text("utf-8"))["version"]
+if ext_version != version:
+    sys.exit(f"extension/manifest.json 版本 {ext_version} 与 Cargo.toml 版本 {version} 不一致，请先同步")
 exe = root / "target" / "release" / "swiftdl.exe"
 if not exe.exists():
     sys.exit("找不到 target/release/swiftdl.exe，请先运行 cargo build --release")

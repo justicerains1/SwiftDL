@@ -85,12 +85,13 @@ fn hint(ui: &mut Ui, p: &Pal, text: &str) {
     ui.label(RichText::new(text).size(12.5).color(p.weak));
 }
 
-fn status_line(ui: &mut Ui, icon: Icon, color: Color32, text: &str) {
+fn status_line(ui: &mut Ui, icon: Icon, color: Color32, text: &str) -> egui::Response {
     ui.horizontal(|ui| {
         let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
         icons::paint(ui.painter(), r, icon, color);
         ui.label(RichText::new(text).size(13.0).color(color));
-    });
+    })
+    .response
 }
 
 /// 分段选择器
@@ -393,13 +394,12 @@ info hash: {}", b.name, b.info_hash));
                                             ui.label(RichText::new(t).size(12.5).color(c));
                                         }
                                         Some(Err(e)) => {
-                                            if crate::engine::sys::is_cert_error(e)
-                                                && let Some(h) = crate::engine::host_key(&self.probed_url)
+                                            if let Some(h) = crate::engine::sys::trust_target(e, &self.probed_url)
                                                 && button(ui, Btn::Secondary, Some(Icon::Alert), tr!("信任此站点"))
                                                     .on_hover_text(trf!("今后忽略 {} 的证书错误。仅在确认该站点可信（如内网、自签名证书）时使用", h))
                                                     .clicked()
                                             {
-                                                m.trust_host(&self.probed_url);
+                                                m.trust_host(&h);
                                                 self.probed_key.clear(); // 重新探测
                                             }
                                             ui.add(
@@ -648,7 +648,7 @@ impl SettingsDialog {
                     match crate::engine::hls::find_ffmpeg(&s.ffmpeg) {
                         Some(f) => status_line(ui, Icon::Check, p.success, &trf!("已找到 ffmpeg：{}", f.display())),
                         None => status_line(ui, Icon::Alert, p.weak, tr!("未找到 ffmpeg，m3u8 视频将保存为 .ts（可正常播放）")),
-                    }
+                    };
                     row(ui, p, tr!("出错自动重试"), |ui| {
                         ui.add(egui::DragValue::new(&mut s.auto_retry).range(0..=20).suffix(tr!(" 次")));
                         hint(ui, p, tr!("每次间隔 30 秒，0 表示不重试"));
@@ -738,7 +738,11 @@ impl SettingsDialog {
                 });
                 section(ui, p, tr!("剪贴板与浏览器"), |ui| {
                     row(ui, p, tr!("浏览器扩展"), |ui| {
-                        if browser::connected() {
+                        if let Some(v) = browser::ext_outdated() {
+                            status_line(ui, Icon::Alert, p.warning, &trf!("已连接（扩展 {}，需更新）", v)).on_hover_text(tr!(
+                                "扩展版本与程序不一致。请在浏览器扩展页点击 SwiftDL 的“重新加载”；若是从其他文件夹加载的，请通过安装向导重新安装"
+                            ));
+                        } else if browser::connected() {
                             status_line(ui, Icon::Check, p.success, tr!("已连接"));
                         } else {
                             status_line(ui, Icon::Alert, p.weak, tr!("本次运行尚未检测到"));
@@ -802,6 +806,14 @@ impl SettingsDialog {
                         if self.cleaned {
                             ui.label(RichText::new(tr!("已清理")).size(12.5).color(p.success));
                         }
+                    });
+                    row(ui, p, tr!("运行日志"), |ui| {
+                        if button(ui, Btn::Secondary, Some(Icon::Folder), tr!("打开日志目录")).clicked() {
+                            let d = crate::diag::dir();
+                            let _ = std::fs::create_dir_all(&d);
+                            let _ = std::process::Command::new("explorer").arg(&d).spawn();
+                        }
+                        hint(ui, p, tr!("保留 7 天，链接已去除账号与参数；反馈问题时可附上"));
                     });
                 });
             });

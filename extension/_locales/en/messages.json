@@ -11,6 +11,9 @@
   "statusConnected": {
     "message": "Connected"
   },
+  "versionMismatch": {
+    "message": "Extension and SwiftDL versions differ: click Reload on the extensions page, or reinstall it with the setup guide in SwiftDL settings"
+  },
   "statusUnpaired": {
     "message": "Not paired"
   },

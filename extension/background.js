@@ -173,13 +173,35 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
 });
 
 // ───────────── 连接握手与右键菜单 ─────────────
-// 向 SwiftDL 报到，程序据此确认扩展已安装并连接
+const VERSION = chrome.runtime.getManifest().version;
+
+// 向 SwiftDL 报到（附带扩展版本），程序据此确认扩展已安装并连接，并返回程序版本
 async function hello() {
   const { port, token } = await pairing();
   try {
-    await fetch(`http://127.0.0.1:${port}/hello`, { method: "POST", headers: { "X-SwiftDL-Token": token } });
+    const r = await fetch(`http://127.0.0.1:${port}/hello`, {
+      method: "POST",
+      headers: { "X-SwiftDL-Token": token, "X-SwiftDL-Ext-Version": VERSION },
+    });
+    if (r.ok) await syncVersion((await r.json().catch(() => ({}))).app);
   } catch (_) {}
 }
+
+/**
+ * 程序升级时会替换扩展文件夹中的文件，但浏览器仍在运行旧代码：版本不一致时重新加载扩展。
+ * 每个程序版本最多自动重新加载一次，避免扩展从其他文件夹加载时反复重载。返回是否触发了重新加载。
+ */
+export async function syncVersion(app) {
+  if (!app || app === VERSION) return false;
+  const { reloadedFor } = await chrome.storage.local.get({ reloadedFor: "" });
+  if (reloadedFor === app) return false;
+  await chrome.storage.local.set({ reloadedFor: app });
+  chrome.runtime.reload();
+  return true;
+}
+
+// MV3 后台空闲后会被回收、有事件时再启动：每次启动都报到，程序升级后能及时发现版本变化
+hello();
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({ id: "swiftdl-link", title: chrome.i18n.getMessage("menuDownload"), contexts: ["link", "video", "audio", "image"] });

@@ -455,6 +455,23 @@ pub fn build_client(proxy: &str, insecure: bool) -> reqwest::Client {
         .read_timeout(Duration::from_secs(30))
         .pool_idle_timeout(Duration::from_secs(30))
         .pool_max_idle_per_host(32);
+    if insecure {
+        // 不校验证书的客户端只能跳转到同样被信任的站点（或明文 HTTP），
+        // 否则跳转目标的证书也会被跳过校验
+        b = b.redirect(reqwest::redirect::Policy::custom(|a| {
+            if a.previous().len() >= 10 {
+                return a.error("too many redirects");
+            }
+            let u = a.url();
+            match u.host_str() {
+                Some(h) if u.scheme() == "https" && !is_trusted_host(h) => {
+                    let h = h.trim_matches(['[', ']']).to_ascii_lowercase();
+                    a.error(trf!("下载被重定向到未信任的站点 {0}，确认可信后可信任该站点并重试 {1}{0})", h, sys::REDIRECT_MARK))
+                }
+                _ => a.follow(),
+            }
+        }));
+    }
     let p = proxy.trim();
     if p.eq_ignore_ascii_case("direct") {
         b = b.no_proxy();
@@ -526,15 +543,15 @@ impl Manager {
         if is_trusted_url(url) { self.insecure.read().unwrap().clone() } else { self.client() }
     }
 
-    /// 信任链接所在站点（忽略其证书错误）并保存设置；返回主机名
-    pub fn trust_host(self: &Arc<Self>, url: &str) -> Option<String> {
-        let h = host_key(url)?;
+    /// 信任站点（忽略其证书错误）并保存设置；主机名通常来自 `sys::trust_target`
+    pub fn trust_host(self: &Arc<Self>, host: &str) {
+        let h = host.trim().trim_matches(['[', ']']).to_ascii_lowercase();
         let mut s = self.settings.read().unwrap().clone();
-        if !s.trusted_hosts.contains(&h) {
-            s.trusted_hosts.push(h.clone());
+        if !h.is_empty() && !s.trusted_hosts.contains(&h) {
+            log_warn!("user trusted host {h}: certificate errors from it are now ignored");
+            s.trusted_hosts.push(h);
             self.apply_settings(s);
         }
-        Some(h)
     }
 
     pub fn repaint(&self) {
@@ -877,6 +894,7 @@ impl Manager {
                         if !m.net_error {
                             m.retries += 1;
                         }
+                        log_info!("task {} auto retry (network error: {}, retries {}/{auto_retry})", t.id, m.net_error, m.retries);
                         t.set_status(Status::Queued);
                         requeue = true;
                     }

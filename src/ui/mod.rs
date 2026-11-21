@@ -185,6 +185,8 @@ pub struct App {
     /// 自动更新：检查结果、下载状态
     update: Option<crate::update::Release>,
     update_slot: UpdateSlot,
+    /// 上次运行崩溃留下的报告（启动时检测，用户关闭提示后清空）
+    crash_report: Option<std::path::PathBuf>,
     update_job: Arc<std::sync::Mutex<UpdateJob>>,
     update_checked_at: Instant,
     quitting: bool,
@@ -243,6 +245,7 @@ impl App {
             tray_tip: (String::new(), Instant::now()),
             update: None,
             update_slot: Arc::default(),
+            crash_report: crate::diag::take_crash_report(),
             update_job: Arc::default(),
             update_checked_at: Instant::now() - Duration::from_secs(3600),
         }
@@ -518,6 +521,7 @@ impl App {
     fn list(&mut self, ui: &mut Ui, rows: &[Row]) {
         let p = theme::pal(ui);
         let vis = self.visible(rows);
+        self.crash_banner(ui, &p);
         self.update_banner(ui, &p);
         ui.horizontal(|ui| {
             ui.label(RichText::new(self.filter.label()).font(bold(17.0)).color(p.text));
@@ -663,11 +667,11 @@ impl App {
             ui.close();
         }
         if st == Status::Error
-            && r.error.as_deref().is_some_and(crate::engine::sys::is_cert_error)
-            && !crate::engine::is_trusted_url(&t.url())
+            && let Some(h) = r.error.as_deref().and_then(|e| crate::engine::sys::trust_target(e, &t.url()))
+            && !crate::engine::is_trusted_host(&h)
             && menu_item(ui, Icon::Refresh, tr!("信任此站点并重试"), false).clicked()
         {
-            self.m.trust_host(&t.url());
+            self.m.trust_host(&h);
             self.m.start(t.id);
             ui.close();
         }
@@ -880,14 +884,13 @@ impl App {
                     let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
                     icons::paint(ui.painter(), r, Icon::Alert, p.danger);
                     if st == Status::Error
-                        && crate::engine::sys::is_cert_error(&e)
-                        && !crate::engine::is_trusted_url(&url)
-                        && let Some(h) = crate::engine::host_key(&url)
+                        && let Some(h) = crate::engine::sys::trust_target(&e, &url)
+                        && !crate::engine::is_trusted_host(&h)
                         && button(ui, Btn::Secondary, Some(Icon::Refresh), tr!("信任此站点并重试"))
                             .on_hover_text(trf!("今后忽略 {} 的证书错误。仅在确认该站点可信（如内网、自签名证书）时使用", h))
                             .clicked()
                     {
-                        self.m.trust_host(&url);
+                        self.m.trust_host(&h);
                         self.m.start(t.id);
                     }
                     ui.add(egui::Label::new(RichText::new(&e).size(13.0).color(p.danger)).truncate()).on_hover_text(&e);
@@ -973,6 +976,11 @@ impl App {
         }
         let result = self.update_slot.lock().unwrap().take();
         if let Some(r) = result {
+            match &r {
+                Ok(Some(rel)) => log_info!("update check: v{} available", rel.version),
+                Ok(None) => log_info!("update check: up to date"),
+                Err(e) => log_warn!("update check failed: {e}"),
+            }
             match r {
                 Ok(Some(rel)) => self.update = Some(rel),
                 Ok(None) if force => self.toast(None, ToastKind::Ok, tr!("已是最新版本"), trf!("当前版本 v{}", env!("CARGO_PKG_VERSION"))),
@@ -983,8 +991,14 @@ impl App {
         let job = self.update_job.lock().unwrap().clone();
         if let UpdateJob::Ready(exe) = job {
             match crate::update::apply_and_restart(&exe) {
-                Ok(()) => self.quit(ctx),
-                Err(e) => *self.update_job.lock().unwrap() = UpdateJob::Failed(e),
+                Ok(()) => {
+                    log_info!("update downloaded and verified, restarting");
+                    self.quit(ctx)
+                }
+                Err(e) => {
+                    log_error!("update apply failed: {e}");
+                    *self.update_job.lock().unwrap() = UpdateJob::Failed(e)
+                }
             }
         }
     }
@@ -998,10 +1012,41 @@ impl App {
             let r = crate::update::download(&client, &rel, &dir).await;
             *job.lock().unwrap() = match r {
                 Ok(p) => UpdateJob::Ready(p),
-                Err(e) => UpdateJob::Failed(e),
+                Err(e) => {
+                    log_error!("update download failed: {e}");
+                    UpdateJob::Failed(e)
+                }
             };
             m.repaint();
         });
+    }
+
+    /// 上次异常退出的提示：可打开报告所在位置，便于反馈问题
+    fn crash_banner(&mut self, ui: &mut Ui, p: &Pal) {
+        let Some(report) = self.crash_report.clone() else { return };
+        Frame::new()
+            .fill(p.danger.gamma_multiply(0.10))
+            .stroke(Stroke::new(1.0, p.danger.gamma_multiply(0.5)))
+            .corner_radius(10)
+            .inner_margin(Margin::symmetric(14, 10))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
+                    icons::paint(ui.painter(), r, Icon::Alert, p.danger);
+                    ui.label(RichText::new(tr!("SwiftDL 上次异常退出")).font(bold(14.0)).color(p.text));
+                    ui.label(RichText::new(tr!("已保存诊断报告，反馈问题时请附上")).size(12.5).color(p.weak));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if icon_button(ui, Icon::X, tr!("关闭"), true).clicked() {
+                            self.crash_report = None;
+                        }
+                        if button(ui, Btn::Secondary, Some(Icon::Folder), tr!("查看报告")).clicked() {
+                            open_path(&report, true);
+                        }
+                    });
+                });
+            });
+        ui.add_space(8.0);
     }
 
     fn update_banner(&mut self, ui: &mut Ui, p: &Pal) {

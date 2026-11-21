@@ -348,6 +348,26 @@ pub static EN: &[(&str, &str)] = &[
         "Certificate errors from these sites are ignored for HTTPS / FTPS. Sites can be added when a download hits an untrusted certificate.",
     ),
     ("选择打开方式", "Open with..."),
+    ("关闭", "Close"),
+    ("旧版本", "old version"),
+    ("已连接（扩展 {}，需更新）", "Connected (extension {}, update needed)"),
+    (
+        "扩展版本与程序不一致。请在浏览器扩展页点击 SwiftDL 的“重新加载”；若是从其他文件夹加载的，请通过安装向导重新安装",
+        "The extension version differs from the app. Click Reload for SwiftDL on the browser extensions page, or reinstall it with the setup guide if it was loaded from another folder.",
+    ),
+    ("查看报告", "Show report"),
+    ("SwiftDL 上次异常退出", "SwiftDL closed unexpectedly last time"),
+    ("已保存诊断报告，反馈问题时请附上", "A diagnostic report was saved. Please attach it when reporting the problem."),
+    ("运行日志", "Logs"),
+    ("打开日志目录", "Open log folder"),
+    (
+        "保留 7 天，链接已去除账号与参数；反馈问题时可附上",
+        "Kept for 7 days. Credentials and query strings are removed from links. Attach them when reporting problems.",
+    ),
+    (
+        "下载被重定向到未信任的站点 {0}，确认可信后可信任该站点并重试 {1}{0})",
+        "Redirected to untrusted site {0}. Trust it to retry if you are sure it is safe {1}{0})",
+    ),
     ("无法打开文件", "Cannot open file"),
     ("文件不存在：{}", "File not found: {}"),
 ];

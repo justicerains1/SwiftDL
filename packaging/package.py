@@ -7,6 +7,10 @@ import re
 import sys
 import zipfile
 
+# 输出含中文文件名：CI 的控制台代码页是 cp1252，且 -I 会忽略 PYTHONIOENCODING，故显式用 UTF-8
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 root = pathlib.Path(__file__).resolve().parent.parent
 version = re.search(r'^version\s*=\s*"([^"]+)"', (root / "Cargo.toml").read_text("utf-8"), re.M).group(1)
 ext_version = json.loads((root / "extension" / "manifest.json").read_text("utf-8"))["version"]

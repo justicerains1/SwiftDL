@@ -347,4 +347,7 @@ pub static EN: &[(&str, &str)] = &[
         "这些站点的 HTTPS / FTPS 证书错误会被忽略；下载遇到证书不可信时可一键添加",
         "Certificate errors from these sites are ignored for HTTPS / FTPS. Sites can be added when a download hits an untrusted certificate.",
     ),
+    ("选择打开方式", "Open with..."),
+    ("无法打开文件", "Cannot open file"),
+    ("文件不存在：{}", "File not found: {}"),
 ];

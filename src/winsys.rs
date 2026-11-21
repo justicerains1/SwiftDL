@@ -341,6 +341,92 @@ pub fn hwnd_of(h: &impl raw_window_handle::HasWindowHandle) -> Option<HWND> {
     }
 }
 
+/// 主窗口句柄（作为“打开方式”等系统对话框的父窗口）
+static MAIN_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+pub fn set_main_hwnd(h: HWND) {
+    MAIN_HWND.store(h.0 as isize, Ordering::Relaxed);
+}
+
+/// 打开已下载的文件：`choose` 为 false 时用系统默认程序打开，没有关联程序则弹出“打开方式”让用户选择；
+/// `choose` 为 true 时直接让用户选择。在后台线程执行，系统对话框不会卡住界面。
+pub fn open_file(path: &std::path::Path, choose: bool) {
+    let path = path.to_path_buf();
+    let owner = MAIN_HWND.load(Ordering::Relaxed);
+    std::thread::spawn(move || {
+        use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize};
+        use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+        let owner = (owner != 0).then_some(HWND(owner as *mut _));
+        // ShellExecuteEx 与“打开方式”对话框都要求 STA 线程
+        let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) }.is_ok();
+        let r = if !path.exists() {
+            Err(trf!("文件不存在：{}", path.display()))
+        } else if choose {
+            open_with_dialog(&path, owner)
+        } else {
+            match shell_open(&path, owner) {
+                Err(OpenErr::NoAssoc) => open_with_dialog(&path, owner),
+                Err(OpenErr::Other(e)) => Err(e),
+                Ok(()) => Ok(()),
+            }
+        };
+        if let Err(e) = r {
+            unsafe { MessageBoxW(owner, &HSTRING::from(e), &HSTRING::from(tr!("无法打开文件")), MB_OK | MB_ICONERROR) };
+        }
+        if com {
+            unsafe { CoUninitialize() };
+        }
+    });
+}
+
+enum OpenErr {
+    /// 该类型文件没有关联的程序
+    NoAssoc,
+    Other(String),
+}
+
+/// 用文件类型的默认操作打开（等同于在资源管理器中双击）
+fn shell_open(path: &std::path::Path, owner: Option<HWND>) -> Result<(), OpenErr> {
+    use windows::Win32::Foundation::ERROR_NO_ASSOCIATION;
+    use windows::Win32::UI::Shell::{SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW};
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let file = HSTRING::from(path.as_os_str());
+    let dir = path.parent().map(|d| HSTRING::from(d.as_os_str())).unwrap_or_default();
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        // 不让系统自己弹错误框：没有关联程序时由我们打开“打开方式”
+        fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC,
+        hwnd: owner.unwrap_or_default(),
+        lpFile: windows::core::PCWSTR(file.as_ptr()),
+        lpDirectory: windows::core::PCWSTR(dir.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    match unsafe { ShellExecuteExW(&mut info) } {
+        Ok(()) => Ok(()),
+        // SE_ERR_NOASSOC = 31
+        Err(e) if e.code() == ERROR_NO_ASSOCIATION.to_hresult() || info.hInstApp.0 as usize == 31 => Err(OpenErr::NoAssoc),
+        Err(e) => Err(OpenErr::Other(e.message())),
+    }
+}
+
+/// 系统“打开方式”对话框：用户选择程序后直接打开，可勾选“始终使用此应用”
+fn open_with_dialog(path: &std::path::Path, owner: Option<HWND>) -> Result<(), String> {
+    use windows::Win32::Foundation::ERROR_CANCELLED;
+    use windows::Win32::UI::Shell::{OAIF_ALLOW_REGISTRATION, OAIF_EXEC, OAIF_REGISTER_EXT, OPENASINFO, SHOpenWithDialog};
+    let file = HSTRING::from(path.as_os_str());
+    let info = OPENASINFO {
+        pcszFile: windows::core::PCWSTR(file.as_ptr()),
+        pcszClass: windows::core::PCWSTR::null(),
+        oaifInFlags: OAIF_ALLOW_REGISTRATION | OAIF_REGISTER_EXT | OAIF_EXEC,
+    };
+    match unsafe { SHOpenWithDialog(owner, &info) } {
+        Ok(()) => Ok(()),
+        Err(e) if e.code() == ERROR_CANCELLED.to_hresult() => Ok(()), // 用户取消
+        Err(e) => Err(e.message()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -202,6 +202,9 @@ impl App {
         let _ = m.ui_ctx.set(cc.egui_ctx.clone());
         let tray = crate::tray::create(&cc.egui_ctx);
         let hwnd = crate::winsys::hwnd_of(cc);
+        if let Some(h) = hwnd {
+            crate::winsys::set_main_hwnd(h);
+        }
         let taskbar = hwnd.and_then(crate::winsys::Taskbar::new);
         let drop_over = hwnd.and_then(|h| crate::winsys::register_drop(h, tx, cc.egui_ctx.clone()));
         Self {
@@ -644,6 +647,10 @@ impl App {
         let t = &r.t;
         if st == Status::Done && menu_item(ui, Icon::External, tr!("打开文件"), false).clicked() {
             open_path(&t.final_path(), false);
+            ui.close();
+        }
+        if st == Status::Done && menu_item(ui, Icon::External, tr!("选择打开方式"), false).clicked() {
+            crate::winsys::open_file(&t.final_path(), true);
             ui.close();
         }
         if menu_item(ui, Icon::Folder, tr!("打开所在文件夹"), false).clicked() {
@@ -1484,16 +1491,15 @@ fn show_window(ctx: &egui::Context) {
     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
 }
 
+/// `select` 为 true 时在资源管理器中定位文件；否则用默认程序打开（无关联程序时让用户选择）
 fn open_path(p: &std::path::Path, select: bool) {
-    let mut c = std::process::Command::new("explorer");
     if select {
         let mut arg = std::ffi::OsString::from("/select,");
         arg.push(p);
-        c.arg(arg);
+        let _ = std::process::Command::new("explorer").arg(arg).spawn();
     } else {
-        c.arg(p);
+        crate::winsys::open_file(p, false);
     }
-    let _ = c.spawn();
 }
 
 #[cfg(test)]

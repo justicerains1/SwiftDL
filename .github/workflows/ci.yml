@@ -1,0 +1,86 @@
+# 构建、测试、打包；推送 v* 标签时额外创建 GitHub Release（程序的自动更新读取最新 Release 的 zip 与其 SHA-256）
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write # 创建 Release
+    steps:
+      - uses: actions/checkout@v5
+
+      # 与本地一致：GNU 工具链 + MinGW-w64（UCRT）
+      - name: MinGW-w64
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: mingw-w64-ucrt-x86_64-gcc
+      - name: Add MinGW to PATH
+        shell: pwsh
+        run: Add-Content $env:GITHUB_PATH "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin"
+
+      - name: Rust (stable, windows-gnu)
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+          rustup default stable-x86_64-pc-windows-gnu
+          rustc -vV
+          gcc --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Version check
+        shell: pwsh
+        run: |
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          $ext = (Get-Content extension/manifest.json -Raw | ConvertFrom-Json).version
+          if ($ext -ne $ver) { throw "extension/manifest.json ($ext) != Cargo.toml ($ver)" }
+          if ("${{ github.ref_type }}" -eq "tag" -and "${{ github.ref_name }}" -ne "v$ver") {
+            throw "tag ${{ github.ref_name }} != Cargo.toml version v$ver"
+          }
+          "VERSION=$ver" >> $env:GITHUB_ENV
+
+      - name: Extension tests
+        run: node --test extension/tests
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Tests
+        run: cargo test --release --locked -- --test-threads=1
+
+      - name: Package
+        run: python -I packaging/package.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SwiftDL-v${{ env.VERSION }}-windows-x64
+          path: dist/SwiftDL-v${{ env.VERSION }}-windows-x64.zip
+          if-no-files-found: error
+
+      - name: Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: SwiftDL ${{ github.ref_name }}
+          files: dist/SwiftDL-v${{ env.VERSION }}-windows-x64.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true

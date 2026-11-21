@@ -45,7 +45,7 @@ jobs:
 
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 24
 
       - name: Version check
         shell: pwsh
@@ -59,7 +59,8 @@ jobs:
           "VERSION=$ver" >> $env:GITHUB_ENV
 
       - name: Extension tests
-        run: node --test extension/tests
+        # 显式 glob：Node 21+ 的 --test 参数按 glob 解析，直接传目录在部分版本中找不到测试
+        run: node --test "extension/tests/*.test.mjs"
 
       - name: Build
         run: cargo build --release --locked

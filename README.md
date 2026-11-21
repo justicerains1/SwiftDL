@@ -54,7 +54,7 @@
 . ./env.sh                     # 设置 RUSTUP_HOME / CARGO_HOME / PATH（含 MinGW），路径按本机修改
 cargo build --release          # 产物：target/release/swiftdl.exe
 cargo test --release -- --test-threads=1
-node --test extension/tests       # 扩展嗅探逻辑与后台流程测试
+node --test "extension/tests/*.test.mjs"  # 扩展嗅探逻辑与后台流程测试
 python -I packaging/package.py # 打包：dist/SwiftDL-v<版本>-windows-x64.zip
 ```
 

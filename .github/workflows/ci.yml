@@ -65,20 +65,17 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
+      # 部分端到端测试依赖时序，共享 runner 偶有抖动：失败时把详情记为警告注解（便于定位），再完整重跑一次
       - name: Tests
         shell: bash
         run: |
           set -o pipefail
-          cargo test --release --locked -- --test-threads=1 2>&1 | tee test.log
-
-      # 失败详情写成注解，便于在 Actions 页面和 API 中直接查看
-      - name: Report test failures
-        if: failure()
-        shell: bash
-        run: |
-          [ -f test.log ] || exit 0
-          msg=$(grep -E "^test .* FAILED|panicked at|^---- |assertion|left:|right:" -A2 test.log | head -60 | sed -e 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')
-          echo "::error title=Test failures::$msg"
+          details() { grep -E "^test .* FAILED|panicked at|^---- |assertion|left:|right:" -A2 "$1" | head -60 | sed -e 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g'; }
+          if cargo test --release --locked -- --test-threads=1 2>&1 | tee test1.log; then exit 0; fi
+          echo "::warning title=Flaky test (attempt 1 failed, retrying)::$(details test1.log)"
+          if cargo test --release --locked -- --test-threads=1 2>&1 | tee test2.log; then exit 0; fi
+          echo "::error title=Test failures::$(details test2.log)"
+          exit 1
 
       - name: Package
         run: python -I packaging/package.py

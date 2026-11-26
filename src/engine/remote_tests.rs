@@ -73,10 +73,13 @@ fn ftp_download() {
     std::fs::create_dir_all(&home).unwrap();
     std::fs::write(home.join("data.bin"), &**FILE).unwrap();
     let port = free_port();
-    let pasv = 30000 + (std::process::id() % 500) as u16 * 40;
+    // 被动端口范围要足够大：libunftp 绑定被动端口时设置了 SO_REUSEADDR，而在 Windows 上这允许两个会话
+    // 同时监听同一个端口，数据连接随即串线（某个分段收到另一个分段偏移处的数据，内容校验偶发失败）。
+    // 原先只有 40 个端口，4 条并发连接约有一成概率撞上；放大到 4000 个后可忽略
+    let pasv = 10000 + (std::process::id() % 8) as u16 * 4000;
     let h = home.clone();
     let server = libunftp::ServerBuilder::new(Box::new(move || unftp_sbe_fs::Filesystem::new(h.clone()).unwrap()))
-        .passive_ports(pasv..=pasv + 39)
+        .passive_ports(pasv..=pasv + 3999)
         .build()
         .unwrap();
     rt.spawn(server.listen(format!("127.0.0.1:{port}")));

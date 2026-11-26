@@ -62,6 +62,13 @@ jobs:
         # 显式 glob：Node 21+ 的 --test 参数按 glob 解析，直接传目录在部分版本中找不到测试
         run: node --test "extension/tests/*.test.mjs"
 
+      # 静态检查：任何 clippy 告警都视为失败（最小安装的工具链不带 clippy，需单独添加）
+      - name: Clippy
+        shell: pwsh
+        run: |
+          rustup component add clippy
+          cargo clippy --all-targets --locked -- -D warnings
+
       - name: Build
         run: cargo build --release --locked
 

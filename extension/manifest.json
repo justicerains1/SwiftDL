@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "__MSG_extName__",
   "default_locale": "zh_CN",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "__MSG_extDesc__",
   "permissions": ["downloads", "cookies", "storage", "contextMenus", "webRequest", "tabs"],
   "host_permissions": ["<all_urls>"],

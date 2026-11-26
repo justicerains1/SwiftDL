@@ -789,6 +789,110 @@ fn sqlite_migration() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// 清空历史下载：只移除已完成（可选出错）的任务；不碰仍在列表中的任务的临时文件，也不会把下载目录当成文件删掉
+#[test]
+fn clear_history() {
+    let root = std::env::temp_dir().join(format!("swiftdl-test-history-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    unsafe { std::env::set_var("APPDATA", root.join("appdata")) };
+    let dl = root.join("dl");
+    std::fs::create_dir_all(&dl).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let mk = |id: u64, name: &str, status: Status| store::TaskRec {
+        id,
+        req: AddReq { url: format!("https://a.com/{id}"), ..Default::default() },
+        name: name.into(),
+        dir: dl.clone(),
+        conns: 8,
+        size: Some(1000),
+        resumable: true,
+        validator: None,
+        probed: true,
+        status,
+        error: (status == Status::Error).then(|| "HTTP 500".to_string()),
+        created: 1,
+        finished: 2,
+        downloaded: 0,
+        segs: vec![],
+        auto_dir: false,
+        scheduled: false,
+        sha256: None,
+        hash: None,
+        retries: 0,
+        hls: None,
+        bt: None,
+    };
+    let recs = vec![
+        mk(1, "a.zip", Status::Done),
+        mk(2, "b.iso", Status::Error),
+        mk(3, "c.mp4", Status::Paused),
+        mk(4, "a.zip", Status::Paused), // 已完成记录还在时重新下载同名文件：与任务 1 对应同一个 a.zip.swdl
+        mk(5, "", Status::Error),       // 探测前就出错：还没有文件名
+        mk(6, "d.bin", Status::Done),
+    ];
+    store::write_bytes("tasks.json", &store::encode(&recs));
+    for f in ["a.zip", "d.bin", "b.iso.swdl", "c.mp4.swdl", "a.zip.swdl"] {
+        std::fs::write(dl.join(f), b"data").unwrap();
+    }
+    let m = Manager::new(rt.handle().clone(), Settings { dir: dl.clone(), recycle: false, ..Default::default() });
+    let ids = |m: &Manager| m.tasks.read().unwrap().iter().map(|t| t.id).collect::<Vec<_>>();
+    let gone = |f: &str| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while dl.join(f).exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        !dl.join(f).exists()
+    };
+    // 文件清理在后台进行：“不应被删”的断言前留出足够时间让它跑完
+    let settle = || std::thread::sleep(Duration::from_millis(300));
+
+    // 1. 不含出错任务、不删文件：只移除两条已完成记录
+    assert_eq!(m.clear_history(false, false), 2);
+    assert_eq!(ids(&m), [2, 3, 4, 5]);
+    settle();
+    for f in ["a.zip", "d.bin", "b.iso.swdl", "c.mp4.swdl", "a.zip.swdl"] {
+        assert!(dl.join(f).exists(), "{f} 不应被删除");
+    }
+
+    // 2. 含出错任务：移除出错的记录及其临时文件，暂停的任务不受影响
+    assert_eq!(m.clear_history(true, false), 2);
+    assert_eq!(ids(&m), [3, 4]);
+    assert!(gone("b.iso.swdl"), "出错任务的临时文件应被删除");
+    settle();
+    for f in ["a.zip", "d.bin", "c.mp4.swdl", "a.zip.swdl"] {
+        assert!(dl.join(f).exists(), "{f} 不应被删除");
+    }
+    assert_eq!(m.clear_history(true, false), 0, "没有历史时什么也不做");
+
+    // 3. 同时删除文件：删掉已完成任务的成品；没有文件名的任务不能连累下载目录
+    std::fs::write(dl.join("c.mp4"), b"finished").unwrap();
+    m.get(3).unwrap().set_status(Status::Done);
+    let unnamed = m.add(NewTask {
+        req: AddReq { url: "https://a.com/unnamed".into(), ..Default::default() },
+        name: String::new(),
+        dir: dl.clone(),
+        auto_dir: false,
+        conns: 1,
+        mode: StartMode::Later,
+        sha256: None,
+    });
+    m.get(unnamed).unwrap().set_status(Status::Done);
+    assert_eq!(m.clear_history(false, true), 2);
+    assert_eq!(ids(&m), [4]);
+    assert!(gone("c.mp4"), "勾选删除文件时应删除成品");
+    settle();
+    assert!(dl.is_dir(), "下载目录不应被删除");
+    for f in ["a.zip", "d.bin", "a.zip.swdl"] {
+        assert!(dl.join(f).exists(), "{f} 不应被删除");
+    }
+
+    // 4. 落盘后只剩一条记录
+    m.save();
+    drop(m);
+    assert_eq!(store::load_tasks().len(), 1);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// 证书不可信：默认拒绝并给出可识别的错误；信任站点后可以下载。需联网，`cargo test -- --ignored untrusted_cert`
 #[test]
 #[ignore]

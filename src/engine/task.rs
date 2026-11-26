@@ -1,8 +1,7 @@
 //! 单任务执行：探测 → 稀疏预分配 → 多连接定位写入 → 动态分段 → 自适应并发 → 校验 → 重命名。
 use super::probe::{self, err_str};
-use super::{Manager, Seg, SegPos, Status, Task, kind, now, sha256_file};
+use super::{CANCELLED, Manager, Seg, SegPos, Status, Task, backoff, kind, now, sha256_file};
 use std::fs::{File, OpenOptions};
-use std::os::windows::fs::FileExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::*};
 use std::time::Duration;
@@ -21,7 +20,6 @@ const MAX_RETRY: u32 = 8;
 const MAX_SEG_ROUNDS: u32 = 3;
 /// 限流后平稳多久恢复一个连接（秒）
 const RESTORE_AFTER: u64 = 30;
-const CANCELLED: &str = "cancelled";
 
 /// 连接停滞超时（毫秒），测试中可调小
 pub static STALL_MS: AtomicU64 = AtomicU64::new(15_000);
@@ -75,7 +73,9 @@ pub async fn run(m: Arc<Manager>, t: Arc<Task>) {
         let req = t.req();
         super::sys::mark_from_web(&t.final_path(), &req.url, req.referrer.as_deref());
     }
-    m.save();
+    // 落盘是 SQLite 提交，放到阻塞线程池；仍然先保存再调度，下一个任务拉起前完成状态已写入
+    let saver = m.clone();
+    let _ = tokio::task::spawn_blocking(move || saver.save()).await;
     m.schedule();
     m.repaint();
 }
@@ -149,27 +149,31 @@ async fn run_inner(m: &Arc<Manager>, t: &Arc<Task>, tok: &CancellationToken) -> 
 
     // 决定是全新下载还是续传
     // 首次运行：确定文件名与（按类型分类后的）目录
-    {
+    // 界面每帧都要读任务信息：查找 ffmpeg（遍历 PATH）、读设置都在任务锁之外做
+    let (unnamed, auto_dir, base_dir) = {
         let meta = t.meta.lock().unwrap();
-        if meta.name.is_empty() {
-            let mut filename = info.filename.clone();
-            if let Some(h) = &info.hls {
-                // HLS：fMP4 或可用 ffmpeg 转封装时保存为 .mp4，否则为 .ts
-                let s = m.settings.read().unwrap();
-                let mp4 = h.fmp4 || (s.hls_mp4 && super::hls::find_ffmpeg(&s.ffmpeg).is_some());
-                let stem = filename.rsplit_once('.').map(|(a, _)| a.to_string()).unwrap_or(filename.clone());
-                filename = format!("{stem}.{}", if mp4 { "mp4" } else { "ts" });
-            }
-            let mut dir = meta.dir.clone();
-            if meta.auto_dir && m.settings.read().unwrap().categorize {
-                dir = dir.join(kind::category(&filename).folder());
-            }
-            drop(meta);
-            let n = m.reserve_name(t.id, &dir, &filename);
-            let mut meta = t.meta.lock().unwrap();
-            meta.name = n;
-            meta.dir = dir;
+        (meta.name.is_empty(), meta.auto_dir, meta.dir.clone())
+    };
+    if unnamed {
+        let (categorize, hls_mp4, ffmpeg) = {
+            let s = m.settings.read().unwrap();
+            (s.categorize, s.hls_mp4, s.ffmpeg.clone())
+        };
+        let mut filename = info.filename.clone();
+        if let Some(h) = &info.hls {
+            // HLS：fMP4 或可用 ffmpeg 转封装时保存为 .mp4，否则为 .ts
+            let mp4 = h.fmp4 || (hls_mp4 && super::hls::find_ffmpeg(&ffmpeg).is_some());
+            let stem = filename.rsplit_once('.').map(|(a, _)| a.to_string()).unwrap_or(filename.clone());
+            filename = format!("{stem}.{}", if mp4 { "mp4" } else { "ts" });
         }
+        let mut dir = base_dir;
+        if auto_dir && categorize {
+            dir = dir.join(kind::category(&filename).folder());
+        }
+        let n = m.reserve_name(t.id, &dir, &filename);
+        let mut meta = t.meta.lock().unwrap();
+        meta.name = n;
+        meta.dir = dir;
     }
     if let Some(h) = info.hls {
         {
@@ -208,29 +212,39 @@ async fn run_inner(m: &Arc<Manager>, t: &Arc<Task>, tok: &CancellationToken) -> 
 
     let part = t.part_path();
     let dir = t.meta.lock().unwrap().dir.clone();
-    std::fs::create_dir_all(&dir).map_err(|e| trf!("无法创建目录: {}", e))?;
-    let f = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(fresh)
-        .open(&part)
-        .map_err(|e| trf!("无法打开文件: {}", e))?;
-    let mut sparse = false;
-    // 磁盘空间预检（稀疏文件不会预先占用空间，因此需要主动检查）
-    if let Some(sz) = size {
-        let need = sz.saturating_sub(t.downloaded.load(Relaxed));
-        if let Some(free) = super::sys::free_space(&dir)
-            && need > free
-        {
-            return Err(trf!("磁盘空间不足（需要 {}，剩余 {}）", human(need), human(free)));
-        }
-    }
-    if fresh && let Some(sz) = size {
-        // 稀疏文件：多连接在远端偏移写入时，NTFS 无需先同步补零整个空洞
-        sparse = sz > 0 && t.segs.lock().unwrap().len() > 1 && set_sparse(&f, true);
-        f.set_len(sz).map_err(|e| trf!("磁盘空间不足或无法预分配: {}", e))?;
-    }
+    let need = size.map(|sz| sz.saturating_sub(t.downloaded.load(Relaxed)));
+    let multi = t.segs.lock().unwrap().len() > 1;
+    // 建目录、打开文件、预分配都是同步的磁盘操作（不支持稀疏文件的文件系统上，预分配会补零整个文件），
+    // 放到阻塞线程池，不占用运行时的工作线程
+    let (f, sparse) = {
+        let part = part.clone();
+        tokio::task::spawn_blocking(move || -> Result<(File, bool), String> {
+            std::fs::create_dir_all(&dir).map_err(|e| trf!("无法创建目录: {}", e))?;
+            let f = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(fresh)
+                .open(&part)
+                .map_err(|e| trf!("无法打开文件: {}", e))?;
+            // 磁盘空间预检（稀疏文件不会预先占用空间，因此需要主动检查）
+            if let Some(need) = need
+                && let Some(free) = super::sys::free_space(&dir)
+                && need > free
+            {
+                return Err(trf!("磁盘空间不足（需要 {}，剩余 {}）", human(need), human(free)));
+            }
+            let mut sparse = false;
+            if fresh && let Some(sz) = size {
+                // 稀疏文件：多连接在远端偏移写入时，NTFS 无需先同步补零整个空洞
+                sparse = sz > 0 && multi && set_sparse(&f, true);
+                f.set_len(sz).map_err(|e| trf!("磁盘空间不足或无法预分配: {}", e))?;
+            }
+            Ok((f, sparse))
+        })
+        .await
+        .map_err(|e| e.to_string())??
+    };
 
     let wtok = tok.child_token();
     let ctx = Arc::new(Ctx {
@@ -475,7 +489,7 @@ async fn worker(c: &Ctx, seg: &Seg) -> End {
         if fails > MAX_RETRY {
             return End::Fail(err.msg);
         }
-        let wait = Duration::from_millis((500u64 << fails.min(6)).min(30_000));
+        let wait = backoff(fails, 30_000);
         tokio::select! {
             _ = tokio::time::sleep(wait) => {}
             _ = c.tok.cancelled() => return End::Cancelled,
@@ -609,18 +623,7 @@ async fn flush(c: &Ctx, seg: &Seg, mut buf: Vec<u8>, off: u64) -> Result<Vec<u8>
     }
     let file = c.file.clone();
     let (r, b) = tokio::task::spawn_blocking(move || {
-        let mut done = 0;
-        let r = loop {
-            if done == buf.len() {
-                break Ok(());
-            }
-            match file.seek_write(&buf[done..], off + done as u64) {
-                Ok(0) => break Err(tr!("写入 0 字节").to_string()),
-                Ok(n) => done += n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => break Err(trf!("写入失败: {}", e)),
-            }
-        };
+        let r = super::sys::write_at(&file, &buf, off);
         (r, buf)
     })
     .await

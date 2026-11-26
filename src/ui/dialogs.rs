@@ -20,6 +20,12 @@ pub enum DialogResult {
     OpenExtGuide,
     /// 立即检查更新
     CheckUpdate,
+    /// 请求清除所有软件数据（需再次确认）
+    PurgeData,
+    /// 从设置中请求清空历史下载（需再次确认）
+    ClearHistory,
+    /// 已清空历史下载，携带移除的任务数
+    Cleared(usize),
 }
 
 fn modal(ctx: &egui::Context, id: &str, width: f32, add: impl FnOnce(&mut Ui, &Pal)) -> bool {
@@ -579,11 +585,15 @@ info hash: {}", b.name, b.info_hash));
 pub struct SettingsDialog {
     s: Settings,
     cleaned: bool,
+    /// 最近一次“关联 / 取消关联”的结果：(是否为关联, 是否成功)
+    assoc: Option<(bool, bool)>,
+    /// ffmpeg 查找结果，按路径设置缓存：自动查找要遍历 PATH，不能每帧都做
+    ffmpeg: Option<(String, Option<PathBuf>)>,
 }
 
 impl SettingsDialog {
     pub fn new(m: &Manager) -> Self {
-        Self { s: m.settings.read().unwrap().clone(), cleaned: false }
+        Self { s: m.settings.read().unwrap().clone(), cleaned: false, assoc: None, ffmpeg: None }
     }
 
     pub fn show(&mut self, ctx: &egui::Context, m: &Arc<Manager>) -> DialogResult {
@@ -645,7 +655,10 @@ impl SettingsDialog {
                             s.ffmpeg = f.display().to_string();
                         }
                     });
-                    match crate::engine::hls::find_ffmpeg(&s.ffmpeg) {
+                    if self.ffmpeg.as_ref().is_none_or(|(setting, _)| *setting != s.ffmpeg) {
+                        self.ffmpeg = Some((s.ffmpeg.clone(), crate::engine::hls::find_ffmpeg(&s.ffmpeg)));
+                    }
+                    match self.ffmpeg.as_ref().and_then(|(_, found)| found.as_ref()) {
                         Some(f) => status_line(ui, Icon::Check, p.success, &trf!("已找到 ffmpeg：{}", f.display())),
                         None => status_line(ui, Icon::Alert, p.weak, tr!("未找到 ffmpeg，m3u8 视频将保存为 .ts（可正常播放）")),
                     };
@@ -689,10 +702,20 @@ impl SettingsDialog {
                     });
                     row(ui, p, tr!("文件关联"), |ui| {
                         if button(ui, Btn::Secondary, None, tr!("关联磁力链接与 .torrent")).clicked() {
-                            self.cleaned = crate::engine::bt::set_association(true);
+                            self.assoc = Some((true, crate::engine::bt::set_association(true)));
                         }
                         if button(ui, Btn::Secondary, None, tr!("取消关联")).clicked() {
-                            crate::engine::bt::set_association(false);
+                            self.assoc = Some((false, crate::engine::bt::set_association(false)));
+                        }
+                        // 取消关联在本来就没有关联时也返回失败，此时不提示
+                        let note = match self.assoc {
+                            Some((true, true)) => Some((tr!("已关联"), p.success)),
+                            Some((true, false)) => Some((tr!("关联失败"), p.danger)),
+                            Some((false, true)) => Some((tr!("已取消关联"), p.success)),
+                            _ => None,
+                        };
+                        if let Some((text, color)) = note {
+                            ui.label(RichText::new(text).size(12.5).color(color));
                         }
                     });
                 });
@@ -797,6 +820,12 @@ impl SettingsDialog {
                         ui.add(egui::DragValue::new(&mut s.clean_done_days).range(0..=3650).suffix(tr!(" 天")));
                         hint(ui, p, tr!("已完成记录保留天数，0 为永久保留"));
                     });
+                    row(ui, p, tr!("下载历史"), |ui| {
+                        if button(ui, Btn::Secondary, Some(Icon::Trash), tr!("清空历史下载")).clicked() {
+                            result = DialogResult::ClearHistory;
+                        }
+                        hint(ui, p, tr!("移除所有已完成和出错的任务记录"));
+                    });
                     row(ui, p, tr!("临时文件"), |ui| {
                         if button(ui, Btn::Secondary, Some(Icon::Trash), tr!("立即清理缓存")).clicked() {
                             let mm = m.clone();
@@ -814,6 +843,12 @@ impl SettingsDialog {
                             let _ = std::process::Command::new("explorer").arg(&d).spawn();
                         }
                         hint(ui, p, tr!("保留 7 天，链接已去除账号与参数；反馈问题时可附上"));
+                    });
+                    row(ui, p, tr!("卸载前清理"), |ui| {
+                        if button(ui, Btn::Danger, Some(Icon::Trash), tr!("清除所有软件数据")).clicked() {
+                            result = DialogResult::PurgeData;
+                        }
+                        hint(ui, p, tr!("删除设置、任务记录、日志与注册表项，便于删除软件"));
                     });
                 });
             });
@@ -874,6 +909,52 @@ impl DeleteDialog {
             });
         });
         if outside {
+            result = DialogResult::Close;
+        }
+        result
+    }
+}
+
+// ───────────── 清空历史下载 ─────────────
+
+pub struct ClearHistoryDialog {
+    include_errors: bool,
+    delete_file: bool,
+}
+
+impl ClearHistoryDialog {
+    pub fn new() -> Self {
+        Self { include_errors: true, delete_file: false }
+    }
+
+    /// `done` / `errors`：当前已完成、出错的任务数，由调用方从本帧快照统计。
+    /// 不响应回车：清空不可撤销，必须点按钮确认
+    pub fn show(&mut self, ctx: &egui::Context, m: &Arc<Manager>, done: usize, errors: usize) -> DialogResult {
+        let mut result = DialogResult::None;
+        let outside = modal(ctx, "clear_history", 420.0, |ui, p| {
+            if header(ui, p, Icon::Trash, p.danger, tr!("清空历史下载")) {
+                result = DialogResult::Close;
+            }
+            ui.label(RichText::new(trf!("将从列表中移除 {} 个已完成的任务记录。", done)).color(p.text));
+            ui.add_space(4.0);
+            if errors > 0 {
+                // 出错的任务可能还在等待自动重试，清掉后已下载的部分无法找回，所以单独列出并允许保留
+                ui.checkbox(&mut self.include_errors, trf!("包含出错的任务（{} 个，已下载的部分会被删除）", errors));
+            }
+            ui.checkbox(&mut self.delete_file, tr!("同时删除已下载的文件"));
+            ui.add_space(4.0);
+            hint(ui, p, tr!("正在下载、排队和已暂停的任务不受影响"));
+            ui.add_space(6.0);
+            footer(ui, |ui| {
+                if button(ui, Btn::Danger, Some(Icon::Trash), tr!("清空")).clicked() {
+                    result = DialogResult::Cleared(m.clear_history(self.include_errors, self.delete_file));
+                }
+                if button(ui, Btn::Secondary, None, tr!("取消")).clicked() {
+                    result = DialogResult::Close;
+                }
+            });
+        });
+        if outside && matches!(result, DialogResult::None) {
             result = DialogResult::Close;
         }
         result
@@ -1110,6 +1191,43 @@ impl CloseAsk {
     }
 }
 
+// ───────────── 清除软件数据 ─────────────
+
+/// 清除所有软件数据前的确认；返回 Some(true) 确认清除并退出，Some(false) 取消
+pub fn purge_confirm(ctx: &egui::Context) -> Option<bool> {
+    let mut r = None;
+    let outside = modal(ctx, "purge_confirm", 440.0, |ui, p| {
+        if header(ui, p, Icon::Alert, p.danger, tr!("清除所有软件数据")) {
+            r = Some(false);
+        }
+        ui.label(RichText::new(tr!("将删除以下内容并退出 SwiftDL，此操作无法撤销：")).color(p.text));
+        ui.add_space(4.0);
+        for item in [
+            tr!("设置、任务列表与下载记录"),
+            tr!("未完成任务的临时文件（.swdl）"),
+            tr!("运行日志、崩溃报告与更新缓存"),
+            tr!("扩展文件、BT 会话与 SFTP 主机密钥"),
+            tr!("开机自启动、磁力链接与 .torrent 关联等注册表项"),
+        ] {
+            ui.label(RichText::new(format!("- {item}")).size(13.0).color(p.weak));
+        }
+        ui.add_space(6.0);
+        ui.label(RichText::new(tr!("已下载完成的文件不会被删除。浏览器中的 SwiftDL 扩展需在扩展管理页中手动移除。")).size(12.5).color(p.weak));
+        footer(ui, |ui| {
+            if button(ui, Btn::Danger, Some(Icon::Trash), tr!("清除并退出")).clicked() {
+                r = Some(true);
+            }
+            if button(ui, Btn::Secondary, None, tr!("取消")).clicked() {
+                r = Some(false);
+            }
+        });
+    });
+    if outside && r.is_none() {
+        r = Some(false);
+    }
+    r
+}
+
 // ───────────── 完成动作倒计时 ─────────────
 
 /// 返回 Some(true) 立即执行，Some(false) 取消
@@ -1144,4 +1262,77 @@ pub fn countdown(ctx: &egui::Context, action: &str, remaining: u64) -> Option<bo
 /// 状态标签：计划中的暂停任务显示为“已计划”
 pub fn status_text(s: Status, scheduled: bool) -> &'static str {
     if s == Status::Paused && scheduled { tr!("已计划") } else { s.label() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eframe::egui::{Event, Modifiers, PointerButton, Pos2, RawInput};
+
+    /// 无界面跑一帧：把输入事件交给 egui 并绘制确认框，返回它这一帧的结果
+    fn frame(ctx: &egui::Context, d: &mut ClearHistoryDialog, m: &Arc<Manager>, events: Vec<Event>) -> DialogResult {
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 700.0))), events, ..Default::default() };
+        let mut result = DialogResult::None;
+        let mut out = ctx.run_ui(input, |ui| {
+            // egui 一帧内可能重跑多遍布局：保留第一个有效结果
+            let r = d.show(ui.ctx(), m, 2, 1);
+            if matches!(result, DialogResult::None) {
+                result = r;
+            }
+        });
+        out.textures_delta.clear(); // 不渲染，纹理更新直接丢弃
+        result
+    }
+
+    /// 清空历史确认框：回车不会触发清空（不可撤销的操作必须点按钮），点“清空”才会移除已完成与出错的任务
+    #[test]
+    fn clear_history_dialog() {
+        let root = std::env::temp_dir().join(format!("swiftdl-test-clear-dialog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        unsafe { std::env::set_var("APPDATA", root.join("appdata")) };
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let rec = |id: u64, name: &str, status: &str| {
+            serde_json::json!({
+                "id": id, "req": { "url": format!("https://a.com/{name}") }, "name": name, "dir": root.join("dl"), "conns": 8,
+                "size": 1000, "resumable": true, "validator": null, "probed": true, "status": status, "error": null,
+                "created": 1, "finished": 2, "downloaded": 0, "segs": []
+            })
+        };
+        let recs = serde_json::json!([rec(1, "a.zip", "Done"), rec(2, "b.iso", "Error"), rec(3, "c.mp4", "Paused"), rec(4, "d.bin", "Done")]);
+        crate::engine::store::write_bytes("tasks.json", &serde_json::to_vec(&recs).unwrap());
+        let m = Manager::new(rt.handle().clone(), Settings { dir: root.join("dl"), recycle: false, ..Default::default() });
+        let ids = |m: &Manager| m.tasks.read().unwrap().iter().map(|t| t.id).collect::<Vec<_>>();
+        assert_eq!(ids(&m), [1, 2, 3, 4]);
+
+        let ctx = egui::Context::default();
+        let mut d = ClearHistoryDialog::new();
+        // 前几帧让对话框完成布局
+        for _ in 0..3 {
+            assert!(matches!(frame(&ctx, &mut d, &m, vec![]), DialogResult::None));
+        }
+
+        // 回车：什么都不发生
+        let enter = |pressed| Event::Key { key: Key::Enter, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE };
+        assert!(matches!(frame(&ctx, &mut d, &m, vec![enter(true)]), DialogResult::None));
+        assert!(matches!(frame(&ctx, &mut d, &m, vec![enter(false)]), DialogResult::None));
+        assert_eq!(ids(&m), [1, 2, 3, 4], "回车不应触发清空");
+
+        // 逐点点击对话框区域（自下而上，按钮在底部）：每个点都用新的对话框状态，
+        // 点到复选框、取消或对话框外都不会清空，只有点中“清空”按钮才会
+        let click = |pos: Pos2| {
+            let mut d = ClearHistoryDialog::new();
+            let button = |pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+            for events in [vec![Event::PointerMoved(pos)], vec![button(true)], vec![button(false)]] {
+                if let DialogResult::Cleared(n) = frame(&ctx, &mut d, &m, events) {
+                    return Some(n);
+                }
+            }
+            None
+        };
+        let cleared = (150..550).rev().step_by(10).flat_map(|y| (250..750).step_by(10).map(move |x| Pos2::new(x as f32, y as f32))).find_map(click);
+        assert_eq!(cleared, Some(3), "点“清空”应移除 2 个已完成和 1 个出错的任务");
+        assert_eq!(ids(&m), [3], "暂停的任务应保留");
+        drop(m);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

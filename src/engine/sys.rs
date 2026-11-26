@@ -55,11 +55,26 @@ pub fn recycle(path: &Path) -> bool {
     unsafe { SHFileOperationW(&mut op) == 0 && op.fAnyOperationsAborted == 0 && !path.exists() }
 }
 
-/// 删除文件：优先移到回收站，不行再直接删除
+/// 删除文件（或多文件 BT 任务的文件夹）：优先移到回收站，不行再直接删除
 pub fn delete_file(path: &Path, to_recycle: bool) {
     if !(to_recycle && recycle(path)) {
-        let _ = std::fs::remove_file(path);
+        let _ = if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
     }
+}
+
+/// 在指定偏移写入整块数据（不移动文件指针，多个连接可同时写同一个文件）
+pub fn write_at(file: &std::fs::File, data: &[u8], off: u64) -> Result<(), String> {
+    use std::os::windows::fs::FileExt;
+    let mut done = 0;
+    while done < data.len() {
+        match file.seek_write(&data[done..], off + done as u64) {
+            Ok(0) => return Err(tr!("写入 0 字节").into()),
+            Ok(n) => done += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(trf!("写入失败: {}", e)),
+        }
+    }
+    Ok(())
 }
 
 /// 去掉 URL 中的账号密码，避免写入文件属性或显示

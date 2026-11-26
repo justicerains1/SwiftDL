@@ -86,7 +86,8 @@ async fn hello(State(s): State<St>, h: HeaderMap) -> axum::response::Response {
 
 /// 已有实例在运行：把参数转交给它。返回 true 表示已转交。
 pub async fn forward(port: u16, token: &str, urls: &[String]) -> bool {
-    let c = reqwest::Client::builder().no_proxy().build().unwrap_or_default();
+    // 必须有超时：占用端口的若是别的程序且不应答，启动会一直卡在这里
+    let c = reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(3)).build().unwrap_or_default();
     let base = format!("http://127.0.0.1:{port}");
     let ok = c.get(format!("{base}/ping")).send().await.ok().filter(|r| r.status().is_success());
     if ok.is_none() {

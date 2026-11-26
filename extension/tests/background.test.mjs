@@ -15,6 +15,7 @@ const local = {};
 const badges = {};
 const posted = [];
 const postedHeaders = [];
+const postedSignals = [];
 let serverToken = "tok-123";
 const tabs = { 7: { id: 7, title: "测试视频页", url: "https://site.com/watch/1" } };
 
@@ -59,6 +60,7 @@ globalThis.fetch = async (url, opt = {}) => {
     if (tok !== serverToken) return new Response("", { status: 403 });
     posted.push(JSON.parse(opt.body));
     postedHeaders.push(opt.headers);
+    postedSignals.push(opt.signal);
     return new Response("", { status: 200 });
   }
   return new Response("", { status: 404 });
@@ -147,6 +149,24 @@ test("程序升级后自动重新加载扩展，每个程序版本只重载一�
   await settle();
   assert.equal(reloads, 3);
   appVersion = VERSION;
+});
+
+test("发往 SwiftDL 的请求带超时，程序无响应时不会一直挂起", async () => {
+  const r = await msg({ type: "download", url: "https://cdn.com/t.mp4", name: "t.mp4" });
+  assert.deepEqual(r, { ok: true });
+  assert.ok(postedSignals.at(-1) instanceof AbortSignal, "/add 请求应带 AbortSignal");
+  assert.equal(postedSignals.at(-1).aborted, false);
+
+  // 程序收到请求却迟迟不应答：信号中止后 send 失败，调用方据此恢复浏览器自己的下载
+  const real = globalThis.fetch;
+  const realTimeout = AbortSignal.timeout;
+  AbortSignal.timeout = () => realTimeout.call(AbortSignal, 20);
+  globalThis.fetch = (url, opt = {}) =>
+    url.includes("/add") ? new Promise((_, reject) => opt.signal.addEventListener("abort", () => reject(opt.signal.reason))) : real(url, opt);
+  const hung = await msg({ type: "download", url: "https://cdn.com/h.mp4", name: "h.mp4" });
+  globalThis.fetch = real;
+  AbortSignal.timeout = realTimeout;
+  assert.equal(hung.ok, false);
 });
 
 test("SwiftDL 未运行时下载返回失败", async () => {

@@ -25,6 +25,18 @@ use tokio_util::sync::CancellationToken;
 pub const PART_EXT: &str = "swdl";
 /// 出错任务自动重试间隔（秒）
 const RETRY_DELAY: u64 = 30;
+/// 任务被取消（暂停、删除、退出）时各下载流程返回的内部错误标记，不显示给用户
+pub(crate) const CANCELLED: &str = "cancelled";
+
+/// 连续失败 `fails` 次后的重试等待：1 秒起指数增长，不超过 `cap_ms`
+pub(crate) fn backoff(fails: u32, cap_ms: u64) -> Duration {
+    Duration::from_millis((500u64 << fails.min(6)).min(cap_ms))
+}
+
+/// 比较路径用的键：Windows 路径不区分大小写，两种分隔符等价，末尾分隔符可有可无
+fn path_key(p: &Path) -> String {
+    p.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase()
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Status {
@@ -36,7 +48,7 @@ pub enum Status {
 }
 
 impl Status {
-    const ALL: [Status; 5] = [Self::Queued, Self::Running, Self::Paused, Self::Done, Self::Error];
+    pub const ALL: [Status; 5] = [Self::Queued, Self::Running, Self::Paused, Self::Done, Self::Error];
     pub fn label(self) -> &'static str {
         match self {
             Self::Queued => tr!("排队中"),
@@ -273,6 +285,16 @@ impl Task {
     pub fn is_scheduled(&self) -> bool {
         self.meta.lock().unwrap().scheduled
     }
+    /// 删除任务时可以一并删除的成品路径。文件名尚未确定时为 None：
+    /// 此时 `final_path()` 就是下载目录本身，绝不能拿去删除
+    fn deletable_output(&self) -> Option<PathBuf> {
+        let m = self.meta.lock().unwrap();
+        let mut parts = Path::new(&m.name).components();
+        match (parts.next(), parts.next()) {
+            (Some(std::path::Component::Normal(_)), None) => Some(m.dir.join(&m.name)),
+            _ => None,
+        }
+    }
 
     fn to_rec(&self) -> store::TaskRec {
         let m = self.meta.lock().unwrap();
@@ -436,7 +458,7 @@ pub fn host_key(url: &str) -> Option<String> {
 
 pub fn is_trusted_host(host: &str) -> bool {
     let h = host.trim_matches(['[', ']']).to_ascii_lowercase();
-    TRUSTED_HOSTS.read().unwrap().iter().any(|t| *t == h)
+    TRUSTED_HOSTS.read().unwrap().contains(&h)
 }
 
 pub fn is_trusted_url(url: &str) -> bool {
@@ -687,40 +709,127 @@ impl Manager {
         self.schedule();
     }
 
-    pub fn remove(self: &Arc<Self>, ids: &[u64], delete_file: bool) {
+    /// 全部开始：把暂停、出错的任务重新排队（一次遍历，只调度一次）
+    pub fn start_all(self: &Arc<Self>) {
+        let mut changed = false;
+        for t in self.tasks.read().unwrap().iter() {
+            if matches!(t.status(), Status::Paused | Status::Error) {
+                t.meta.lock().unwrap().retries = 0;
+                t.set_status(Status::Queued);
+                changed = true;
+            }
+        }
+        if changed {
+            self.mark_dirty();
+        }
+        self.schedule();
+    }
+
+    /// 全部暂停：停下正在下载的任务，排队中的改为暂停
+    pub fn pause_all(&self) {
+        let mut changed = false;
+        for t in self.tasks.read().unwrap().iter() {
+            match t.status() {
+                Status::Running => t.cancel.lock().unwrap().cancel(),
+                Status::Queued => t.set_status(Status::Paused),
+                _ => continue,
+            }
+            changed = true;
+        }
+        if changed {
+            self.mark_dirty();
+        }
+    }
+
+    /// 删除任务，返回实际移除的数量。总是清掉未完成任务的临时文件；
+    /// `delete_file` 为 true 时连同已下载完成的文件一起删除
+    pub fn remove(self: &Arc<Self>, ids: &[u64], delete_file: bool) -> usize {
+        let ids: std::collections::HashSet<u64> = ids.iter().copied().collect();
+        self.remove_where(|t| ids.contains(&t.id), delete_file)
+    }
+
+    /// 清空历史下载：移除所有已完成的任务记录；`include_errors` 时连同出错的任务（及其临时文件）。
+    /// 下载中、排队和已暂停的任务不受影响
+    pub fn clear_history(self: &Arc<Self>, include_errors: bool, delete_files: bool) -> usize {
+        let n = self.remove_where(
+            |t| match t.status() {
+                Status::Done => true,
+                Status::Error => include_errors,
+                _ => false,
+            },
+            delete_files,
+        );
+        log_info!("history cleared: {n} task(s) removed (errors included: {include_errors}, files deleted: {delete_files})");
+        n
+    }
+
+    fn remove_where(self: &Arc<Self>, pred: impl Fn(&Task) -> bool, delete_file: bool) -> usize {
+        // 在写锁内挑选：自动重试、调度都在读锁下改状态，判断与移除之间状态不会被它们改掉
         let removed: Vec<Arc<Task>> = {
             let mut tasks = self.tasks.write().unwrap();
-            let (rm, keep) = std::mem::take(&mut *tasks).into_iter().partition(|t| ids.contains(&t.id));
+            let (rm, keep) = std::mem::take(&mut *tasks).into_iter().partition(|t| pred(t));
             *tasks = keep;
             rm
         };
+        if removed.is_empty() {
+            return 0;
+        }
         for t in &removed {
             t.cancel.lock().unwrap().cancel();
         }
         self.mark_dirty();
         self.schedule();
-        // 等待下载线程释放文件句柄后再删除
+        self.repaint();
+        let n = removed.len();
         let recycle = self.settings.read().unwrap().recycle;
+        let me = self.clone();
         self.rt.spawn(async move {
-            for t in removed {
-                for _ in 0..100 {
-                    if t.status() != Status::Running {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+            // 等仍在下载的任务停下并释放文件句柄（所有任务共用这一次等待，最多 5 秒）
+            for _ in 0..100 {
+                if removed.iter().all(|t| t.status() != Status::Running) {
+                    break;
                 }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            // 仍在列表中的任务正在使用的临时文件不能动：
+            // 已完成记录与重新下载的同名任务对应同一个 .swdl 路径
+            let in_use: std::collections::HashSet<String> =
+                me.tasks.read().unwrap().iter().filter(|t| t.status() != Status::Done).map(|t| path_key(&t.part_path())).collect();
+            let (mut parts, mut outputs) = (Vec::new(), Vec::new());
+            for t in &removed {
+                let done = t.status() == Status::Done;
                 let bt_hash = t.meta.lock().unwrap().bt.as_ref().map(|b| b.info_hash.clone()).filter(|h| !h.is_empty());
                 if let Some(h) = bt_hash {
-                    // BT：从会话移除，按需删除已下载的文件（可能是文件夹）
+                    // BT：从会话移除（任务仍在会话中时由它删除已下载的文件），并清掉缓存的种子文件
                     bt::forget(&h, delete_file).await;
-                    continue;
+                    parts.push(bt::cached_torrent(&h));
+                } else if !done {
+                    // 已完成的任务没有临时文件
+                    let part = t.part_path();
+                    if !in_use.contains(&path_key(&part)) {
+                        parts.push(part);
+                    }
                 }
-                let _ = std::fs::remove_file(t.part_path());
-                if delete_file && t.status() == Status::Done {
-                    sys::delete_file(&t.final_path(), recycle);
+                // 已完成的 BT 任务通常已不在会话中（不做种时完成即移出，重启后会话为空），同样在这里删除
+                if delete_file
+                    && done
+                    && let Some(out) = t.deletable_output()
+                {
+                    outputs.push(out);
                 }
             }
+            // 回收站是同步的 Shell 调用，放到阻塞线程池，不占用运行时的工作线程
+            let _ = tokio::task::spawn_blocking(move || {
+                for p in parts {
+                    let _ = std::fs::remove_file(p);
+                }
+                for p in outputs {
+                    sys::delete_file(&p, recycle);
+                }
+            })
+            .await;
         });
+        n
     }
 
     /// 更新失效链接：新链接大小一致才接受，然后继续续传
@@ -870,6 +979,7 @@ impl Manager {
         };
         let mut any = false;
         let mut requeue = false;
+        let mut retried: Vec<(u64, bool, u32)> = Vec::new();
         let ts = now();
         for t in self.tasks.read().unwrap().iter() {
             let cur = t.downloaded.load(Relaxed);
@@ -894,7 +1004,7 @@ impl Manager {
                         if !m.net_error {
                             m.retries += 1;
                         }
-                        log_info!("task {} auto retry (network error: {}, retries {}/{auto_retry})", t.id, m.net_error, m.retries);
+                        retried.push((t.id, m.net_error, m.retries));
                         t.set_status(Status::Queued);
                         requeue = true;
                     }
@@ -902,6 +1012,10 @@ impl Manager {
                 _ => {}
             }
             t.speed.store(0, Relaxed);
+        }
+        // 日志要写文件，放到任务表与任务锁之外
+        for (id, net, retries) in retried {
+            log_info!("task {id} auto retry (network error: {net}, retries {retries}/{auto_retry})");
         }
         // 计划任务：仅在时间窗边沿触发，避免与用户手动操作冲突
         let active = schedule.active(sched::local_minutes());
@@ -929,17 +1043,33 @@ impl Manager {
 
     /// 持久化：只写入有变化的任务行，返回写入行数（JSON 回退模式下为 0 或 1）
     pub fn save(&self) -> usize {
-        let recs: Vec<_> = self.tasks.read().unwrap().iter().map(|t| t.to_rec()).collect();
+        // 先拿存储锁再取快照：并发的两次保存按取快照的先后写入，较旧的快照不会盖掉较新的
+        let mut db = self.db.lock().unwrap();
+        // 先清标记再取快照：取快照之后的修改会重新置位，不会被这次保存吞掉
         self.dirty.store(false, Release);
-        if let Some(db) = self.db.lock().unwrap().as_mut() {
-            return db.save(&recs);
+        let recs: Vec<_> = self.tasks.read().unwrap().iter().map(|t| t.to_rec()).collect();
+        if let Some(db) = db.as_mut() {
+            return match db.save(&recs) {
+                Ok(n) => {
+                    store::note_save("tasks", None);
+                    n
+                }
+                Err(e) => {
+                    store::note_save("tasks", Some(&e));
+                    self.mark_dirty(); // 下个节拍重试
+                    0
+                }
+            };
         }
         let bytes = store::encode(&recs);
         let mut last = self.last_saved.lock().unwrap();
         if *last == bytes {
             return 0;
         }
-        store::write_bytes("tasks.json", &bytes);
+        if !store::write_bytes("tasks.json", &bytes) {
+            self.mark_dirty();
+            return 0;
+        }
         *last = bytes;
         1
     }
@@ -962,22 +1092,25 @@ impl Manager {
                 self.mark_dirty();
             }
         }
+        // 目录与临时文件都按不区分大小写的键比较：同一目录的两种写法（D:\DL 与 d:\dl）
+        // 否则会被当成两个目录，其中仍在使用的临时文件会被误判为孤立文件删掉
         let (dirs, parts) = {
             let tasks = self.tasks.read().unwrap();
-            let mut dirs: Vec<PathBuf> = tasks.iter().map(|t| t.meta.lock().unwrap().dir.clone()).collect();
-            dirs.push(s.dir.clone());
-            dirs.sort();
-            dirs.dedup();
-            let parts: Vec<PathBuf> = tasks.iter().filter(|t| t.status() != Status::Done).map(|t| t.part_path()).collect();
+            let mut dirs: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
+            for d in tasks.iter().map(|t| t.meta.lock().unwrap().dir.clone()).chain([s.dir.clone()]) {
+                dirs.entry(path_key(&d)).or_insert(d);
+            }
+            let parts: std::collections::HashSet<String> =
+                tasks.iter().filter(|t| t.status() != Status::Done).map(|t| path_key(&t.part_path())).collect();
             (dirs, parts)
         };
         let old = SystemTime::now() - Duration::from_secs(600);
-        for d in dirs {
+        for d in dirs.into_values() {
             let Ok(rd) = std::fs::read_dir(&d) else { continue };
             for e in rd.flatten() {
                 let p = e.path();
                 if p.extension().is_some_and(|x| x == PART_EXT)
-                    && !parts.contains(&p)
+                    && !parts.contains(&path_key(&p))
                     && e.metadata().and_then(|m| m.modified()).is_ok_and(|m| m < old)
                 {
                     let _ = std::fs::remove_file(&p);

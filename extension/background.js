@@ -5,6 +5,8 @@ import { classify, mergeItem, normalizeKey, parseMaster, suggestName, totalSize 
 
 const DEFAULTS = { enabled: true, minSizeKB: 0, port: 52080, floatBtn: true, token: "" };
 const cfg = () => chrome.storage.local.get(DEFAULTS);
+// 本地接口应当立刻应答；程序卡住时不能让被暂停的浏览器下载一直等下去
+const ADD_TIMEOUT_MS = 5000;
 
 /** 配对信息：优先使用 SwiftDL 释放扩展时写入的 config.json，否则用用户粘贴的令牌 */
 export async function pairing() {
@@ -40,6 +42,7 @@ async function send(info) {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-SwiftDL-Token": token },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(ADD_TIMEOUT_MS),
   });
   if (r.status === 403) throw new Error(chrome.i18n.getMessage("unpairedError") || "unpaired");
   if (!r.ok) throw new Error(`HTTP ${r.status}`);

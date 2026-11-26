@@ -1,7 +1,9 @@
-//! 持久化：%APPDATA%\swiftdl\{settings,tasks}.json，先写临时文件再原子替换。
+//! 持久化：设置在 %APPDATA%\swiftdl\settings.json（先写临时文件再原子替换），
+//! 任务在 SQLite 库 swiftdl.db（每个任务一行，只写变化的行）；数据库不可用时回退到 tasks.json。
 use super::{AddReq, Settings, Status};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Serialize, Deserialize)]
 pub struct TaskRec {
@@ -44,28 +46,49 @@ pub fn data_dir() -> PathBuf {
 }
 
 fn read<T: for<'a> Deserialize<'a>>(name: &str) -> Option<T> {
-    let s = std::fs::read(data_dir().join(name)).ok()?;
-    serde_json::from_slice(&s).ok()
+    let path = data_dir().join(name);
+    let s = std::fs::read(&path).ok()?;
+    match serde_json::from_slice(&s) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            // 文件损坏：调用方会回落到默认值，随后的保存将覆盖原文件，先留一份副本
+            log_warn!("{name} is corrupt ({e}); keeping a copy as {name}.bad");
+            let _ = std::fs::copy(&path, data_dir().join(format!("{name}.bad")));
+            None
+        }
+    }
 }
 
 pub fn encode<T: Serialize>(v: &T) -> Vec<u8> {
     serde_json::to_vec(v).unwrap_or_default()
 }
 
-pub fn write_bytes(name: &str, bytes: &[u8]) {
+static SAVE_FAILING: AtomicBool = AtomicBool::new(false);
+
+/// 记录保存结果。保存每隔几秒就有一次，因此只在“开始失败”和“恢复正常”时各写一条日志
+pub fn note_save(what: &str, err: Option<&dyn std::fmt::Display>) {
+    match err {
+        Some(e) if !SAVE_FAILING.swap(true, Ordering::Relaxed) => log_error!("saving {what} failed: {e}"),
+        None if SAVE_FAILING.swap(false, Ordering::Relaxed) => log_info!("saving {what} works again"),
+        _ => {}
+    }
+}
+
+/// 先写临时文件再原子替换；返回是否成功
+pub fn write_bytes(name: &str, bytes: &[u8]) -> bool {
     let dir = data_dir();
     let _ = std::fs::create_dir_all(&dir);
     let tmp = dir.join(format!("{name}.tmp"));
-    if std::fs::write(&tmp, bytes).is_ok() {
-        let _ = std::fs::rename(&tmp, dir.join(name));
-    }
+    let r = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, dir.join(name)));
+    note_save(name, r.as_ref().err().map(|e| e as &dyn std::fmt::Display));
+    r.is_ok()
 }
 
 pub fn load_settings() -> Settings {
     read("settings.json").unwrap_or_default()
 }
 pub fn save_settings(s: &Settings) {
-    write_bytes("settings.json", &encode(s))
+    write_bytes("settings.json", &encode(s));
 }
 /// 读取任务列表（优先 SQLite；数据库不可用时回退到 JSON）
 pub fn load_tasks() -> Vec<TaskRec> {
@@ -109,23 +132,32 @@ impl Db {
             if let Some(recs) = read::<Vec<TaskRec>>("tasks.json")
                 && !recs.is_empty()
             {
-                self.save(&recs);
-                let _ = std::fs::rename(&legacy, data_dir().join("tasks.json.bak"));
+                // 写入数据库成功后才把旧文件改名备份；失败时保留原文件，下次启动再迁移
+                match self.save(&recs) {
+                    Ok(_) => {
+                        let _ = std::fs::rename(&legacy, data_dir().join("tasks.json.bak"));
+                    }
+                    Err(e) => log_error!("migrating tasks.json to the database failed: {e}"),
+                }
                 return recs;
             }
         }
         let mut out = Vec::with_capacity(rows.len());
         for (id, pos, json) in rows {
-            if let Ok(r) = serde_json::from_slice::<TaskRec>(&json) {
-                self.cache.insert(id, (pos, json));
-                out.push(r);
+            match serde_json::from_slice::<TaskRec>(&json) {
+                Ok(r) => {
+                    self.cache.insert(id, (pos, json));
+                    out.push(r);
+                }
+                Err(e) => log_warn!("task {id} in the database cannot be read and is skipped: {e}"),
             }
         }
         out
     }
 
-    /// 保存：只写入新增/变化/删除的行，返回写入的行数
-    pub fn save(&mut self, recs: &[TaskRec]) -> usize {
+    /// 保存：只写入新增/变化/删除的行，返回写入的行数。
+    /// 任何一行失败都回滚整个事务且不更新缓存，下次保存会重试这些行
+    pub fn save(&mut self, recs: &[TaskRec]) -> rusqlite::Result<usize> {
         let mut changed: Vec<(u64, i64, Vec<u8>)> = Vec::new();
         for (pos, r) in recs.iter().enumerate() {
             let json = encode(r);
@@ -137,25 +169,21 @@ impl Db {
         let alive: std::collections::HashSet<u64> = recs.iter().map(|r| r.id).collect();
         let removed: Vec<u64> = self.cache.keys().filter(|id| !alive.contains(id)).copied().collect();
         if changed.is_empty() && removed.is_empty() {
-            return 0;
+            return Ok(0);
         }
-        let Ok(tx) = self.conn.transaction() else { return 0 };
+        let tx = self.conn.transaction()?;
         {
-            let Ok(mut up) = tx.prepare_cached(
+            let mut up = tx.prepare_cached(
                 "INSERT INTO tasks (id, pos, json) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET pos = ?2, json = ?3",
-            ) else {
-                return 0;
-            };
+            )?;
             for (id, pos, json) in &changed {
-                let _ = up.execute(rusqlite::params![*id as i64, pos, json]);
+                up.execute(rusqlite::params![*id as i64, pos, json])?;
             }
             for id in &removed {
-                let _ = tx.execute("DELETE FROM tasks WHERE id = ?1", [*id as i64]);
+                tx.execute("DELETE FROM tasks WHERE id = ?1", [*id as i64])?;
             }
         }
-        if tx.commit().is_err() {
-            return 0;
-        }
+        tx.commit()?;
         let n = changed.len() + removed.len();
         for (id, pos, json) in changed {
             self.cache.insert(id, (pos, json));
@@ -163,6 +191,6 @@ impl Db {
         for id in &removed {
             self.cache.remove(id);
         }
-        n
+        Ok(n)
     }
 }

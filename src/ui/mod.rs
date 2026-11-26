@@ -7,7 +7,7 @@ pub use theme::app_icon;
 
 use crate::engine::{AddReq, Manager, Move, Status, Task, ThemeMode, UiEvent};
 use crate::tray::{Tray, TrayCmd};
-use dialogs::{AddDialog, CloseAsk, CloseChoice, DeleteDialog, DialogResult, ExtGuide, RelinkDialog, SettingsDialog, status_text};
+use dialogs::{AddDialog, ClearHistoryDialog, CloseAsk, CloseChoice, DeleteDialog, DialogResult, ExtGuide, RelinkDialog, SettingsDialog, status_text};
 use eframe::egui::{
     self, Align, Align2, Frame, Id, Key, Layout, Margin, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2,
 };
@@ -62,6 +62,10 @@ impl Filter {
             Self::Unfinished => matches!(s, Status::Paused | Status::Error),
             Self::Done => s == Status::Done,
         }
+    }
+    /// 该分类下的任务数；`c` 为 `status_counts` 的结果
+    fn count(self, c: &[usize; 5]) -> usize {
+        Status::ALL.iter().filter(|s| self.matches(**s)).map(|s| c[*s as usize]).sum()
     }
 }
 
@@ -127,7 +131,8 @@ type UpdateSlot = Arc<std::sync::Mutex<Option<Result<Option<crate::update::Relea
 enum UpdateJob {
     #[default]
     Idle,
-    Downloading,
+    /// 下载中（进度）；从本地文件安装时为 None
+    Downloading(Option<Arc<crate::update::Progress>>),
     Ready(std::path::PathBuf),
     Failed(String),
 }
@@ -155,9 +160,20 @@ struct Row {
     segs: Option<(u32, u32)>,
 }
 
+/// 各状态的任务数（下标为 `Status as usize`），一次遍历得到
+fn status_counts(rows: &[Row]) -> [usize; 5] {
+    let mut c = [0; 5];
+    for r in rows {
+        c[r.status as usize] += 1;
+    }
+    c
+}
+
 pub struct App {
     m: Arc<Manager>,
     rx: Receiver<UiEvent>,
+    /// `logic()` 本帧取的任务快照，留给随后的 `ui()` 复用，避免每帧取两次
+    rows: Option<Vec<Row>>,
     sel: HashSet<u64>,
     anchor: Option<usize>,
     add: Option<AddDialog>,
@@ -166,6 +182,10 @@ pub struct App {
     relink: Option<RelinkDialog>,
     ext_guide: Option<ExtGuide>,
     close_ask: Option<CloseAsk>,
+    /// 清空历史下载的确认框
+    clear_history: Option<ClearHistoryDialog>,
+    /// 清除所有软件数据的确认框
+    purge_ask: bool,
     filter: Filter,
     sort: Sort,
     sort_desc: bool,
@@ -212,6 +232,7 @@ impl App {
         Self {
             m,
             rx,
+            rows: None,
             sel: HashSet::new(),
             anchor: None,
             add: None,
@@ -220,6 +241,8 @@ impl App {
             relink: None,
             ext_guide: None,
             close_ask: None,
+            clear_history: None,
+            purge_ask: false,
             filter: Filter::All,
             sort: Sort::Added,
             sort_desc: false,
@@ -274,10 +297,6 @@ impl App {
 
     fn selected(&self) -> Vec<u64> {
         self.sel.iter().copied().collect()
-    }
-
-    fn all_ids(&self) -> Vec<u64> {
-        self.m.tasks.read().unwrap().iter().map(|t| t.id).collect()
     }
 
     fn snapshot(&self) -> Vec<Row> {
@@ -378,8 +397,9 @@ impl App {
             }
         }
         if self.prev.len() > rows.len() {
-            self.prev.retain(|id, _| rows.iter().any(|r| r.t.id == *id));
-            self.sel.retain(|id| rows.iter().any(|r| r.t.id == *id));
+            let alive: HashSet<u64> = rows.iter().map(|r| r.t.id).collect();
+            self.prev.retain(|id, _| alive.contains(id));
+            self.sel.retain(|id| alive.contains(id));
         }
     }
 
@@ -396,9 +416,9 @@ impl App {
         ui.label(RichText::new(tr!("分类")).size(12.0).color(p.weak));
         ui.add_space(2.0);
         ui.spacing_mut().item_spacing.y = 2.0;
+        let counts = status_counts(rows);
         for f in Filter::ALL {
-            let n = rows.iter().filter(|r| f.matches(r.status)).count();
-            if nav_item(ui, &p, f.icon(), f.label(), n, self.filter == f).clicked() {
+            if nav_item(ui, &p, f.icon(), f.label(), f.count(&counts), self.filter == f).clicked() {
                 self.filter = f;
             }
         }
@@ -466,11 +486,11 @@ impl App {
             separator_v(ui, &p);
             ui.add_space(6.0);
             if button(ui, Btn::Secondary, Some(Icon::Play), tr!("全部开始")).clicked() {
-                self.all_ids().into_iter().for_each(|id| self.m.start(id));
+                self.m.start_all();
             }
             ui.add_space(4.0);
             if button(ui, Btn::Secondary, Some(Icon::Pause), tr!("全部暂停")).clicked() {
-                self.all_ids().into_iter().for_each(|id| self.m.pause(id));
+                self.m.pause_all();
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if icon_button(ui, Icon::Settings, tr!("设置"), true).clicked() {
@@ -537,11 +557,11 @@ impl App {
                     }
                 });
                 ui.label(RichText::new(tr!("排序")).size(13.0).color(p.weak));
-                if self.filter == Filter::Done && !vis.is_empty() {
+                // 有历史（已完成或出错的任务）时在任何分类下都可清空；点击后先确认
+                if rows.iter().any(|r| matches!(r.status, Status::Done | Status::Error)) {
                     ui.add_space(8.0);
-                    if button(ui, Btn::Secondary, Some(Icon::Trash), tr!("清除记录")).on_hover_text(tr!("仅移除列表记录，不删除文件")).clicked() {
-                        let ids: Vec<u64> = vis.iter().map(|r| r.t.id).collect();
-                        self.m.remove(&ids, false);
+                    if button(ui, Btn::Secondary, Some(Icon::Trash), tr!("清空历史")).on_hover_text(tr!("移除所有已完成和出错的任务记录")).clicked() {
+                        self.clear_history = Some(ClearHistoryDialog::new());
                     }
                 }
             });
@@ -1005,15 +1025,36 @@ impl App {
 
     fn start_update(&mut self) {
         let Some(rel) = self.update.clone() else { return };
-        *self.update_job.lock().unwrap() = UpdateJob::Downloading;
+        let progress = Arc::new(crate::update::Progress::default());
+        *self.update_job.lock().unwrap() = UpdateJob::Downloading(Some(progress.clone()));
         let (job, client, m) = (self.update_job.clone(), self.m.client(), self.m.clone());
         self.m.rt.spawn(async move {
             let dir = crate::engine::store::data_dir().join("update");
-            let r = crate::update::download(&client, &rel, &dir).await;
+            let srcs = crate::update::sources(&rel.zip_url);
+            let r = crate::update::download(&client, &rel, &srcs, &dir, &progress).await;
             *job.lock().unwrap() = match r {
                 Ok(p) => UpdateJob::Ready(p),
                 Err(e) => {
                     log_error!("update download failed: {e}");
+                    UpdateJob::Failed(e)
+                }
+            };
+            m.repaint();
+        });
+    }
+
+    /// 网络无法下载时：用户用其他方式拿到安装包，选中后同样按 SHA-256 校验再安装
+    fn install_update_from_file(&mut self) {
+        let Some(rel) = self.update.clone() else { return };
+        let Some(zip) = rfd::FileDialog::new().add_filter("zip", &["zip"]).pick_file() else { return };
+        *self.update_job.lock().unwrap() = UpdateJob::Downloading(None);
+        let (job, m) = (self.update_job.clone(), self.m.clone());
+        self.m.rt.spawn_blocking(move || {
+            let dir = crate::engine::store::data_dir().join("update");
+            *job.lock().unwrap() = match crate::update::install_zip(&rel, &zip, &dir) {
+                Ok(p) => UpdateJob::Ready(p),
+                Err(e) => {
+                    log_error!("local update package rejected: {e}");
                     UpdateJob::Failed(e)
                 }
             };
@@ -1068,15 +1109,42 @@ impl App {
                     ui.label(RichText::new(trf!("发现新版本 v{}", rel.version)).font(bold(14.0)).color(p.text));
                     ui.label(RichText::new(trf!("当前 v{}", env!("CARGO_PKG_VERSION"))).size(12.5).color(p.weak));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| match &job {
-                        UpdateJob::Downloading | UpdateJob::Ready(_) => {
-                            ui.label(RichText::new(tr!("正在下载并校验更新")).size(12.5).color(p.weak));
+                        UpdateJob::Downloading(prog) => {
+                            let text = match prog {
+                                Some(pg) => {
+                                    let (done, total) = (pg.done.load(Relaxed), pg.total.load(Relaxed));
+                                    if let Some(pct) = (done * 100).checked_div(total) {
+                                        trf!("正在下载更新 {}%（{} / {}）", pct, fmt_size(done), fmt_size(total))
+                                    } else if done > 0 {
+                                        trf!("正在下载更新 {}", fmt_size(done))
+                                    } else {
+                                        tr!("正在连接下载源").to_string()
+                                    }
+                                }
+                                None => tr!("正在校验安装包").to_string(),
+                            };
+                            ui.label(RichText::new(text).size(12.5).color(p.weak));
+                            ui.add(egui::Spinner::new().size(14.0));
+                            ui.ctx().request_repaint_after(Duration::from_millis(250));
+                        }
+                        UpdateJob::Ready(_) => {
+                            ui.label(RichText::new(tr!("正在安装更新")).size(12.5).color(p.weak));
                             ui.add(egui::Spinner::new().size(14.0));
                         }
                         _ => {
-                            if button(ui, Btn::Primary, Some(Icon::Download), tr!("立即更新")).clicked() {
+                            let failed = matches!(job, UpdateJob::Failed(_));
+                            let label = if failed { tr!("重试") } else { tr!("立即更新") };
+                            if button(ui, Btn::Primary, Some(Icon::Download), label).clicked() {
                                 self.start_update();
                             }
-                            if button(ui, Btn::Secondary, None, tr!("查看更新内容")).clicked() {
+                            if failed {
+                                if button(ui, Btn::Secondary, Some(Icon::Folder), tr!("从本地文件安装")).clicked() {
+                                    self.install_update_from_file();
+                                }
+                                if button(ui, Btn::Secondary, None, tr!("在浏览器中下载")).clicked() {
+                                    let _ = std::process::Command::new("explorer").arg(crate::update::browser_url(&rel.zip_url)).spawn();
+                                }
+                            } else if button(ui, Btn::Secondary, None, tr!("查看更新内容")).clicked() {
                                 let _ = std::process::Command::new("explorer").arg(&rel.page).spawn();
                             }
                             if button(ui, Btn::Secondary, None, tr!("忽略此版本")).clicked() {
@@ -1089,6 +1157,11 @@ impl App {
                 });
                 if let UpdateJob::Failed(e) = &job {
                     ui.label(RichText::new(e).size(12.5).color(p.danger));
+                    ui.label(
+                        RichText::new(tr!("网络无法访问时，可在设置的“网络”中配置代理后重试；或在浏览器中下载安装包，再选择“从本地文件安装”。"))
+                            .size(12.0)
+                            .color(p.weak),
+                    );
                 }
             });
         ui.add_space(8.0);
@@ -1153,7 +1226,14 @@ impl App {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context, rows: &[Row]) {
-        if self.add.is_some() || self.settings.is_some() || self.delete.is_some() || self.relink.is_some() || self.ext_guide.is_some() {
+        if self.add.is_some()
+            || self.settings.is_some()
+            || self.delete.is_some()
+            || self.relink.is_some()
+            || self.ext_guide.is_some()
+            || self.clear_history.is_some()
+            || self.purge_ask
+        {
             return;
         }
         let typing = ctx.memory(|m| m.focused().is_some());
@@ -1234,7 +1314,7 @@ impl eframe::App for App {
     /// 每帧（包括窗口隐藏在托盘时）都会调用：处理托盘、关闭、完成动作
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // 状态变化、任务栏进度、托盘提示：窗口隐藏在托盘时也要更新
-        let rows = self.snapshot();
+        let mut rows = self.snapshot();
         self.detect_changes(ctx, &rows);
         self.update_system(&rows);
         self.poll_update(ctx, false);
@@ -1257,13 +1337,17 @@ impl eframe::App for App {
             }
         }
         let cmds: Vec<TrayCmd> = self.tray.as_ref().map(|t| t.rx.try_iter().collect()).unwrap_or_default();
+        let acted = !cmds.is_empty();
         for c in cmds {
             match c {
                 TrayCmd::Show => self.show(ctx),
-                TrayCmd::StartAll => self.all_ids().into_iter().for_each(|id| self.m.start(id)),
-                TrayCmd::PauseAll => self.all_ids().into_iter().for_each(|id| self.m.pause(id)),
+                TrayCmd::StartAll => self.m.start_all(),
+                TrayCmd::PauseAll => self.m.pause_all(),
                 TrayCmd::Quit => self.quit(ctx),
             }
+        }
+        if acted {
+            rows = self.snapshot(); // 托盘命令改了任务状态：本帧就显示新状态
         }
         // 关闭按钮：最小化到托盘（首次询问）
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting && self.tray.is_some() {
@@ -1277,7 +1361,7 @@ impl eframe::App for App {
             }
         }
         // 全部完成后的动作：从“有任务在跑”变为“全部空闲”时开始倒计时
-        let busy = self.m.tasks.read().unwrap().iter().any(|t| matches!(t.status(), Status::Running | Status::Queued));
+        let busy = rows.iter().any(|r| matches!(r.status, Status::Running | Status::Queued));
         if self.after_all != AfterAll::Nothing && self.was_busy && !busy && self.countdown_at.is_none() {
             self.countdown_at = Some(Instant::now());
             self.show(ctx);
@@ -1293,6 +1377,7 @@ impl eframe::App for App {
                 ctx.request_repaint_after(Duration::from_millis(250));
             }
         }
+        self.rows = Some(rows);
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -1308,7 +1393,8 @@ impl eframe::App for App {
                 UiEvent::Show => self.show(&ctx),
             }
         }
-        let rows = self.snapshot();
+        // 同一帧内 eframe 先调 logic() 再调 ui()：直接用它取好的快照
+        let rows = self.rows.take().unwrap_or_else(|| self.snapshot());
         self.shortcuts(&ctx, &rows);
         self.sample_speed(&rows);
         let p = theme::pal(ui);
@@ -1345,8 +1431,26 @@ impl eframe::App for App {
                     self.ext_guide = Some(ExtGuide::new());
                 }
                 DialogResult::CheckUpdate => self.poll_update(&ctx, true),
-                DialogResult::None => {}
+                DialogResult::PurgeData => {
+                    self.settings = None;
+                    self.purge_ask = true;
+                }
+                // 确认框叠在设置之上，设置里尚未保存的修改不丢
+                DialogResult::ClearHistory => self.clear_history = Some(ClearHistoryDialog::new()),
+                DialogResult::None | DialogResult::Cleared(_) => {}
             }
+        }
+        let counts = status_counts(&rows);
+        let (done, errors) = (counts[Status::Done as usize], counts[Status::Error as usize]);
+        match self.clear_history.as_mut().map(|d| d.show(&ctx, &self.m, done, errors)) {
+            Some(DialogResult::Cleared(n)) => {
+                self.clear_history = None;
+                if n > 0 {
+                    self.toast(None, ToastKind::Ok, tr!("历史已清空"), trf!("已移除 {} 条记录", n));
+                }
+            }
+            Some(DialogResult::Close) => self.clear_history = None,
+            _ => {}
         }
         if let Some(d) = &mut self.delete
             && matches!(d.show(&ctx, &self.m), DialogResult::Close)
@@ -1365,6 +1469,16 @@ impl eframe::App for App {
             && matches!(d.show(&ctx, &self.m), DialogResult::Close)
         {
             self.ext_guide = None;
+        }
+        if self.purge_ask
+            && let Some(ok) = dialogs::purge_confirm(&ctx)
+        {
+            self.purge_ask = false;
+            if ok {
+                log_warn!("user requested to purge all data, quitting");
+                crate::purge::request();
+                self.quit(&ctx);
+            }
         }
         if let Some(d) = &mut self.close_ask {
             let choice = d.show(&ctx);

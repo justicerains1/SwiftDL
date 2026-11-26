@@ -1,6 +1,6 @@
 //! BT / 磁力：基于 librqbit。磁力链接、.torrent 链接或本地文件 → 获取元数据 → 选择文件 → 下载（可做种）。
 use super::probe::Info;
-use super::{AddReq, Manager, Task, store};
+use super::{AddReq, CANCELLED, Manager, Task, store};
 use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, Session, SessionOptions};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -11,7 +11,6 @@ use std::sync::atomic::Ordering::*;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-const CANCELLED: &str = "cancelled";
 /// 磁力链接获取元数据的最长等待时间
 const META_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -48,6 +47,11 @@ pub fn is_bt(url: &str) -> bool {
 
 fn torrent_dir() -> PathBuf {
     store::data_dir().join("bt")
+}
+
+/// 缓存的种子文件（供续传时免去重新获取元数据）；删除任务时一并清掉
+pub(super) fn cached_torrent(info_hash: &str) -> PathBuf {
+    torrent_dir().join(format!("{info_hash}.torrent"))
 }
 
 fn limits(m: &Manager) -> (Option<NonZeroU32>, Option<NonZeroU32>) {
@@ -133,7 +137,7 @@ pub async fn probe(m: &Manager, client: &reqwest::Client, req: &AddReq) -> Resul
     };
     let hash = r.info_hash.as_string();
     let _ = std::fs::create_dir_all(torrent_dir());
-    let _ = std::fs::write(torrent_dir().join(format!("{hash}.torrent")), &r.torrent_bytes);
+    let _ = std::fs::write(cached_torrent(&hash), &r.torrent_bytes);
     let files: Vec<(String, u64)> = r.info.iter_file_details().map(|f| (f.filename.to_string(), f.len)).collect();
     let name = super::probe::sanitize(&r.info.name().map(|n| n.to_string()).unwrap_or_else(|| hash.clone()));
     let total = files.iter().map(|f| f.1).sum();
@@ -157,7 +161,7 @@ pub async fn run(m: &Arc<Manager>, t: &Arc<Task>, tok: &CancellationToken, clien
     };
     std::fs::create_dir_all(&dir).map_err(|e| trf!("无法创建目录: {}", e))?;
     // 先取得元数据：已缓存的种子文件立即可用；磁力链接需从节点获取（之后用得到的种子数据正式添加）
-    let cached = torrent_dir().join(format!("{}.torrent", prev.info_hash));
+    let cached = cached_torrent(&prev.info_hash);
     let src = if !prev.info_hash.is_empty() && cached.exists() {
         AddTorrent::from_bytes(std::fs::read(&cached).map_err(|e| e.to_string())?)
     } else {
@@ -181,7 +185,7 @@ pub async fn run(m: &Arc<Manager>, t: &Arc<Task>, tok: &CancellationToken, clien
         AddTorrentResponse::ListOnly(r) => {
             let hash = r.info_hash.as_string();
             let _ = std::fs::create_dir_all(torrent_dir());
-            let _ = std::fs::write(torrent_dir().join(format!("{hash}.torrent")), &r.torrent_bytes);
+            let _ = std::fs::write(cached_torrent(&hash), &r.torrent_bytes);
             let name = super::probe::sanitize(&r.info.name().map(|n| n.to_string()).unwrap_or_else(|| hash.clone()));
             let multi = r.info.iter_file_details().count() > 1;
             // 多文件种子放进以种子名命名的文件夹

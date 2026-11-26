@@ -9,6 +9,7 @@ mod diag;
 mod browser;
 mod clipboard;
 mod engine;
+mod purge;
 mod server;
 mod tray;
 mod update;
@@ -20,6 +21,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 fn main() {
+    // 清除数据的辅助进程：等主程序退出后删除数据目录；不能初始化日志，否则会重新创建数据目录
+    let mut raw = std::env::args().skip(1);
+    if raw.next().as_deref() == Some(purge::ARG) {
+        i18n::apply(engine::store::load_settings().lang);
+        purge::run_helper(raw.next().and_then(|p| p.parse().ok()));
+        return;
+    }
     diag::init();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
@@ -163,6 +171,14 @@ fn main() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     });
+    if purge::requested() {
+        // 清除数据：删除未完成任务的临时文件，不再保存任何状态，由辅助进程在退出后删除数据目录
+        let parts: Vec<_> = m.tasks.read().unwrap().iter().filter(|t| t.status() != engine::Status::Done).map(|t| t.part_path()).collect();
+        purge::remove_part_files(&parts);
+        purge::clear_registry();
+        log_info!("purge: exiting, helper started={}", purge::spawn_helper());
+        return;
+    }
     for t in &running {
         t.set_status(engine::Status::Queued);
     }

@@ -1,19 +1,18 @@
 //! HLS（m3u8）流媒体下载：播放列表解析、清晰度选择、分片并发下载有序写入、AES-128 解密、续传、ffmpeg 合并为 MP4。
 //! 不处理 DRM（SAMPLE-AES、Widevine 等），遇到时明确提示。
 use super::probe::{err_str, with_headers};
-use super::{AddReq, Manager, Task, now};
+use super::sys::write_at;
+use super::{AddReq, CANCELLED, Manager, Task, backoff, now};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::os::windows::fs::FileExt;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering::*;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-const CANCELLED: &str = "cancelled";
 const MAX_RETRY: u32 = 6;
 /// 播放列表最大 8 MiB
 const MAX_PLAYLIST: usize = 8 << 20;
@@ -446,7 +445,7 @@ async fn fetch_seg(c: &Ctx, url: &str, range: Option<(u64, u64)>, key: Option<([
                 if fails > if fatal { 2 } else { MAX_RETRY } {
                     return Err(e);
                 }
-                let wait = Duration::from_millis((500u64 << fails.min(6)).min(20_000));
+                let wait = backoff(fails, 20_000);
                 tokio::select! {
                     _ = tokio::time::sleep(wait) => {}
                     _ = c.tok.cancelled() => return Err(CANCELLED.into()),
@@ -454,19 +453,6 @@ async fn fetch_seg(c: &Ctx, url: &str, range: Option<(u64, u64)>, key: Option<([
             }
         }
     }
-}
-
-fn write_at(file: &File, data: &[u8], off: u64) -> Result<(), String> {
-    let mut done = 0;
-    while done < data.len() {
-        match file.seek_write(&data[done..], off + done as u64) {
-            Ok(0) => return Err(tr!("写入 0 字节").into()),
-            Ok(n) => done += n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(trf!("写入失败: {}", e)),
-        }
-    }
-    Ok(())
 }
 
 /// 执行 HLS 任务。调用前任务名称与目录已确定。

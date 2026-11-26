@@ -53,7 +53,8 @@ pub fn write(level: &str, msg: &str) {
         prune(&d, "swiftdl-", ".log", KEEP_DAYS);
     }
     if let Some((_, f)) = g.as_mut() {
-        let _ = writeln!(f, "{time} {level:5} {}", scrub(msg));
+        // 先拼成一整行再写：File 没有缓冲，直接 writeln! 会拆成多次系统调用
+        let _ = f.write_all(format!("{time} {level:5} {}\n", scrub(msg)).as_bytes());
     }
 }
 

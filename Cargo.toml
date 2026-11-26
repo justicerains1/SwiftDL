@@ -10,20 +10,20 @@ axum = { version = "0.8.9", default-features = false, features = ["http1", "json
 eframe = { version = "0.37.0", default-features = false, features = ["wgpu_no_default_features", "default_fonts", "clipboard"] }
 wgpu = { version = "30", default-features = false, features = ["dx12", "wgsl"] }
 percent-encoding = "2.3.2"
-reqwest = { version = "0.13.5", default-features = false, features = ["native-tls", "stream", "system-proxy", "socks", "charset"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["native-tls", "stream", "system-proxy", "socks"] }
 rfd = "0.18.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "sync", "time", "macros", "net"] }
 tokio-util = { version = "0.7", default-features = false, features = ["io"] }
 url = "2.5.8"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_DataExchange", "Win32_System_Power", "Win32_System_SystemInformation", "Win32_Storage_FileSystem", "Win32_UI_Shell", "Win32_Security_Cryptography", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_Globalization"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_DataExchange", "Win32_System_Power", "Win32_System_SystemInformation", "Win32_Storage_FileSystem", "Win32_UI_Shell", "Win32_Security_Cryptography", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_Globalization", "Win32_System_Threading"] }
 sha2 = "0.11.1"
 tray-icon = "0.26.1"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 aes = "0.9.4"
 cbc = { version = "0.2.1", features = ["block-padding", "alloc"] }
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Memory", "Win32_System_SystemServices", "Win32_UI_WindowsAndMessaging", "Win32_System_Registry", "UI_Notifications", "Data_Xml_Dom", "Win32_System_WinRT", "Win32_System_DataExchange", "Win32_Graphics_Gdi", "Win32_System_Com_StructuredStorage"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Memory", "Win32_System_SystemServices", "Win32_UI_WindowsAndMessaging", "Win32_System_Registry", "UI_Notifications", "Data_Xml_Dom", "Win32_System_WinRT", "Win32_System_DataExchange", "Win32_System_Com_StructuredStorage"] }
 raw-window-handle = "0.6"
 windows-core = "0.62.2"
 rusqlite = { version = "0.43.0", features = ["bundled"] }
